@@ -18,8 +18,9 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from automated_test_util import *
-from test_util import GenArgList
+
+from oneflow.test_utils.automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
@@ -51,7 +52,7 @@ def _test_pixel_shuffle_impl(
     test_case, device, shape, h_upscale_factor, w_upscale_factor
 ):
     x = np.random.randn(*shape)
-    input = flow.Tensor(
+    input = flow.tensor(
         x, dtype=flow.float32, requires_grad=True, device=flow.device(device)
     )
     m = flow.nn.PixelShuffle(
@@ -92,7 +93,7 @@ class TestPixelShuffleModule(flow.unittest.TestCase):
         m.train(random())
         device = random_device()
         m.to(device)
-        x = random_pytorch_tensor(ndim=4, dim1=num_channels).to(device)
+        x = random_tensor(ndim=4, dim1=num_channels).to(device)
         y = m(x)
         return y
 

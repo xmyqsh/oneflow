@@ -18,7 +18,12 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import Array2Numpy, FlattenArray, GenArgList, Index2Coordinate
+from oneflow.test_utils.test_util import (
+    Array2Numpy,
+    FlattenArray,
+    GenArgList,
+    Index2Coordinate,
+)
 
 import oneflow as flow
 import oneflow.unittest
@@ -62,7 +67,7 @@ def _np_zero_pad2d_grad(src, dest, padding):
 
 def _test_ZeroPad2d(test_case, shape, padding, value, device):
     np_input = np.random.random(shape)
-    of_input = flow.Tensor(
+    of_input = flow.tensor(
         np_input, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     if isinstance(padding, int):

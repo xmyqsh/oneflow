@@ -17,7 +17,8 @@ import unittest
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 from oneflow.nn.common_types import _size_2_t
 
 
@@ -34,7 +35,7 @@ class TestUnfold(flow.unittest.TestCase):
         m.train(random())
         device = random_device()
         m.to(device)
-        x = random_pytorch_tensor(
+        x = random_tensor(
             ndim=4,
             dim0=random(1, 5),
             dim1=random(1, 5),
@@ -42,7 +43,14 @@ class TestUnfold(flow.unittest.TestCase):
             dim3=random(10, 20),
         ).to(device)
         y = m(x)
-        return y
+        func_y = torch.nn.functional.unfold(
+            x,
+            kernel_size=random(1, 3).to(_size_2_t),
+            dilation=random(1, 2).to(_size_2_t) | nothing(),
+            padding=random(0, 1).to(_size_2_t) | nothing(),
+            stride=random(1, 2).to(_size_2_t) | nothing(),
+        )
+        return y, func_y
 
 
 if __name__ == "__main__":

@@ -16,6 +16,11 @@ import os
 import sys
 import oneflow
 
+sys.path.insert(0, os.path.abspath("."))
+CN_DOCS = os.getenv("CN_DOCS")
+if CN_DOCS:
+    import cn
+
 # -- Project information -----------------------------------------------------
 
 project = u"OneFlow"
@@ -36,7 +41,17 @@ release = u""
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = ["sphinx.ext.autodoc", "sphinx.ext.napoleon", "recommonmark"]
+extensions = [
+    "sphinx.ext.autodoc",
+    "sphinx.ext.napoleon",
+    "recommonmark",
+    "sphinx.ext.autosummary",
+    "sphinx_copybutton",
+]
+
+# build the templated autosummary files
+autosummary_generate = True
+numpydoc_show_class_members = False
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -96,7 +111,6 @@ html_static_path = ["_static"]
 # 'searchbox.html']``.
 #
 # html_sidebars = {}
-
 
 # -- Options for HTMLHelp output ---------------------------------------------
 
@@ -182,9 +196,7 @@ epub_exclude_files = ["search.html"]
 
 autodoc_default_options = {
     "undoc-members": True,
-    "exclude-members": "__weakref__",
-    "exclude-members": "__init__",
-    "exclude-members": "forward",
+    "exclude-members": "forward, extra_repr, reset_parameters",
 }
 
 

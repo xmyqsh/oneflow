@@ -17,8 +17,8 @@ limitations under the License.
 #define ONEFLOW_CORE_GRAPH_TASK_NODE_H_
 
 #include "oneflow/core/graph/exec_graph.h"
-#include "oneflow/core/job/id_manager.h"
 #include "oneflow/core/job/task.pb.h"
+#include "oneflow/core/graph/task_edge.pb.h"
 #include "oneflow/core/operator/operator.h"
 #include "oneflow/core/common/auto_registration_factory.h"
 #include "oneflow/core/memory/memory_zone.h"
@@ -41,6 +41,8 @@ RegstDescProto* FindOrCreateProducedCtrlRegstDesc(TaskProto* task_proto,
 RegstDescIdSet* FindOrCreateConsumedCtrlRegstDescIdSet(TaskProto* task_proto,
                                                        const std::string& regst_desc_name);
 
+bool inline IsValidChainId(int64_t val) { return val >= 0; }
+
 class TaskEdge;
 
 class TaskNode : public Node<TaskNode, TaskEdge> {
@@ -53,8 +55,9 @@ class TaskNode : public Node<TaskNode, TaskEdge> {
   int64_t machine_id() const { return machine_id_; }
   int64_t thrd_id() const { return thrd_id_; }
   int64_t task_id() const { return task_id_; }
+  const StreamId& stream_id() const;
   int64_t chain_id() const { return chain_id_; }
-  int64_t order_in_graph() const { return order_in_graph_; }
+  int64_t order_in_chain() const { return order_in_chain_; }
   const ExecGraph& exec_gph() const { return exec_gph_; }
   std::shared_ptr<RegstDesc> GetProducedRegst(const std::string& name);
   const std::list<std::shared_ptr<RegstDesc>>& GetConsumedRegst(const std::string& name);
@@ -67,13 +70,15 @@ class TaskNode : public Node<TaskNode, TaskEdge> {
   }
   DeviceType device_type() const;
   virtual const ParallelContext* parallel_ctx() const { return nullptr; }
-  int64_t GpuPhyId() const { return Global<IDMgr>::Get()->GetGpuPhyIdFromThrdId(thrd_id_); }
+
+  // Different types of TaskNode/Compile Mode choose different output BlobDesc inference methods
+  virtual ExecNode::InferBlobDescsMethod GetInferBlobDescsMethod() const = 0;
 
   // Setters
   void set_machine_id(int64_t val);
   void set_thrd_id(int64_t val);
   void set_chain_id(int64_t val);
-  void set_order_in_graph(int64_t val);
+  void set_order_in_chain(int64_t val);
 
   // Build
   virtual void ProduceAllRegstsAndBindEdges() = 0;
@@ -94,8 +99,13 @@ class TaskNode : public Node<TaskNode, TaskEdge> {
   virtual TaskType GetTaskType() const { return TaskType::kInvalid; }
   std::string VisualStr() const override;
   virtual bool IsMeaningLess();
-  virtual void ToProto(TaskProto*) const;
-  virtual bool IsIndependent() const { return false; }
+  void ToProto(TaskProto* task_proto) const { ToProto(task_proto, /*check*/ true); }
+  // Used to create task node from proto in plan separation compilation.
+  virtual void InitFromProtoExceptConsumedRegsts(const TaskProto& task_proto);
+  Maybe<void> InitConsumedRegstsFromProto(
+      const TaskProto& task_proto,
+      const std::function<Maybe<RegstDesc>(int64_t regst_desc_id)>& RegstDesc4Id);
+  virtual void ToProto(TaskProto* task_proto, bool check) const;
   void BindEdgeWithProducedRegst(TaskEdge*, const std::string& name);
   virtual MemZoneId MemZoneId121() const;
   bool BuildCtrlRegstDescIfNeed(TaskNode* dst_node, std::string* name);
@@ -114,6 +124,12 @@ class TaskNode : public Node<TaskNode, TaskEdge> {
   TaskEdge* SoleOutDataEdge() const;
   size_t in_data_edges_size() const;
   size_t out_data_edges_size() const;
+  const TaskId& new_task_id() const {
+    CHECK(has_new_task_id());
+    return *new_task_id_;
+  }
+  void update_new_task_id(const TaskId& task_id);
+  bool has_new_task_id() const { return static_cast<bool>(new_task_id_); }
 
  protected:
   std::shared_ptr<RegstDesc> ProduceRegst(const std::string& name, bool enable_reuse_mem);
@@ -144,17 +160,23 @@ class TaskNode : public Node<TaskNode, TaskEdge> {
 
  private:
   void UpdateTaskId();
+  std::shared_ptr<RegstDesc> GetAndCheckRegst(const std::string& name, bool enable_reuse_mem,
+                                              int32_t min_register_num,
+                                              int32_t max_register_num) const;
 
   int64_t machine_id_;
   int64_t thrd_id_;
   int64_t task_id_;
   int64_t chain_id_;
-  int64_t order_in_graph_;
+  int64_t order_in_chain_;
+  std::unique_ptr<TaskId> new_task_id_;
 
   ExecGraph exec_gph_;
   HashMap<std::string, std::shared_ptr<RegstDesc>> produced_regsts_;
   HashMap<std::string, std::list<std::shared_ptr<RegstDesc>>> consumed_regsts_;
 };
+
+class TaskGraphRebuildCtx;
 
 class TaskEdge final : public Edge<TaskNode, TaskEdge> {
  public:
@@ -163,6 +185,7 @@ class TaskEdge final : public Edge<TaskNode, TaskEdge> {
   ~TaskEdge() override = default;
 
   std::shared_ptr<RegstDesc> GetRegst(const std::string& name_in_producer) const;
+  bool HasRegst(const std::string& name_in_producer) const;
   std::shared_ptr<RegstDesc> GetSoleRegst() const;
   std::vector<std::shared_ptr<RegstDesc>> GetRegsts() const;
   const HashSet<LogicalBlobId>& GetLbis() const { return lbis_; }
@@ -172,33 +195,16 @@ class TaskEdge final : public Edge<TaskNode, TaskEdge> {
   void AddLbis(const std::vector<LogicalBlobId>& lbis) { lbis_.insert(lbis.begin(), lbis.end()); }
 
   void CheckRegstLbiValid() const;
+  bool HasRegst() const { return !name_in_producer2regst_.empty(); }
+
+  Maybe<void> InitFromProto(const TaskEdgeProto& proto,
+                            const TaskGraphRebuildCtx& task_graph_rebuild_ctx);
+  void ToProto(TaskEdgeProto* proto) const;
 
  private:
   HashSet<LogicalBlobId> lbis_;
   HashMap<std::string, std::shared_ptr<RegstDesc>> name_in_producer2regst_;
 };
-
-struct IndependentThreadNum4TaskType final {
-  IndependentThreadNum4TaskType(size_t num) : has_func_(false), num_(num) {}
-  IndependentThreadNum4TaskType(std::function<size_t()> get_num)
-      : has_func_(true), get_num_(get_num) {}
-  operator size_t() { return has_func_ ? get_num_() : num_; }
-
- private:
-  bool has_func_;
-  size_t num_;
-  std::function<size_t()> get_num_;
-};
-
-#define REGISTER_INDEPENDENT_THREAD_NUM(task_type, ...)                     \
-  REGISTER_CLASS_CREATOR(int32_t, task_type, IndependentThreadNum4TaskType, \
-                         ([] { return new IndependentThreadNum4TaskType(__VA_ARGS__); }))
-
-struct TickTockTaskType final {};
-
-#define REGISTER_TICK_TOCK_TASK_TYPE(task_type)                \
-  REGISTER_CLASS_CREATOR(int32_t, task_type, TickTockTaskType, \
-                         ([] { return new TickTockTaskType; }))
 
 }  // namespace oneflow
 

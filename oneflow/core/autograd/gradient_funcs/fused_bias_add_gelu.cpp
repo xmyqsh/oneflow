@@ -63,10 +63,10 @@ class FusedBiasAddGelu : public OpExprGradFunction<FusedBiasAddGeluInterpState> 
       std::vector<int32_t> reduce_axes_vec;
       reduce_axes_vec.reserve(num_axes);
       for (int i = 0; i < num_axes; ++i) {
-        if (i != ctx->axis) { reduce_axes_vec.push_back(i); }
+        if (i != ctx->axis) { reduce_axes_vec.emplace_back(i); }
       }
       in_grads->at(1) =
-          JUST(functional::ReduceSum(fused_bias_add_gelu_grad, reduce_axes_vec, false));
+          JUST(functional::ReduceSum(fused_bias_add_gelu_grad, reduce_axes_vec, false, NullOpt));
     }
     if (ctx->input_requires_grad) { in_grads->at(0) = fused_bias_add_gelu_grad; }
     return Maybe<void>::Ok();

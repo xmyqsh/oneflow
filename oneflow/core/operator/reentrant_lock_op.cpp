@@ -32,7 +32,7 @@ Maybe<void> InferBlobDescs(const std::function<BlobDesc*(const std::string&)>& B
   const DataType data_type = start->data_type();
   CHECK_OR_RETURN(IsIntegralDataType(data_type));
   BlobDesc* out = BlobDesc4BnInOp("out");
-  out->mut_shape() = Shape({1});
+  out->set_shape(Shape({1}));
   out->set_data_type(data_type);
   return Maybe<void>::Ok();
 }
@@ -55,7 +55,7 @@ Maybe<void> ReentrantLockOp::InferOutBlobDescs(
 
 Maybe<void> ReentrantLockOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   return Maybe<void>::Ok();
 }
 

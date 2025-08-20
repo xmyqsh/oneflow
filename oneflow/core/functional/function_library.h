@@ -17,7 +17,11 @@ limitations under the License.
 #define ONEFLOW_CORE_FUNCTIONAL_FUNCTION_LIBRARY_H_
 
 #include "oneflow/core/common/util.h"
+#include "oneflow/core/common/wrap_dim_utils.h"
 #include "oneflow/core/functional/packed_functor.h"
+#include "oneflow/core/common/stride.h"
+#include "oneflow/core/framework/tensor_methods.h"
+#include "oneflow/core/common/throw.h"
 
 namespace oneflow {
 namespace one {
@@ -25,25 +29,52 @@ namespace functional {
 
 class FunctionLibrary {
  public:
-  using FunctorCreator = std::function<Maybe<PackedFunctor>()>;
-
   virtual ~FunctionLibrary() = default;
 
+  template<typename T>
+  struct PackedFuncCreatorMap;
+
+  template<typename R, typename... Args>
+  struct PackedFuncCreatorMap<R(Args...)> {
+    using FunctorCreator = typename std::function<PackedFunctor<R(Args...)>()>;
+
+    static HashMap<std::string, FunctorCreator>* Get() {
+      static HashMap<std::string, FunctorCreator> functors;
+      return &functors;
+    }
+  };
+
   template<typename Func>
-  void add_functor(const std::string& func_name) {
-    CHECK_EQ(functors_.count(func_name), 0)
-        << "The functor with name " << func_name << " has been registered more than once.";
-    functors_.emplace(func_name, [func_name]() -> Maybe<PackedFunctor> {
+  void add_functor(const std::string& func_name, const Func& func) {
+    using func_type = typename function_traits<Func>::func_type;
+    add_functor_creator<Func>(
+        func_name, [=]() { return PackedFunctorMaker<func_type>::make(func_name, func); });
+  }
+
+  template<typename Func>
+  void add_one_functor(const std::string& func_name) {
+    using func_type = typename function_traits<Func>::func_type;
+    add_functor_creator<Func>(func_name, [=]() {
+      // Lazily construct functor since ops maybe have not been registered.
       Func func;
-      return PackedFunctor::Make(func_name, func);
+      return PackedFunctorMaker<func_type>::make(func_name, func);
     });
   }
 
-  Maybe<PackedFunctor> find(const std::string& func_name) {
-    const auto& it = functors_.find(func_name);
-    CHECK_OR_RETURN(it != functors_.end())
-        << "Functor was not found for op " << func_name
-        << ", please check whether the functor has been registered correctly or not.";
+  template<typename... Fs>
+  void add_functor(const std::string& func_name) {
+    static_assert(sizeof...(Fs) > 0, "at least one functor is expected");
+    (add_one_functor<Fs>(func_name), ...);
+  }
+
+  template<typename R, typename... Args>
+  auto find(const std::string& func_name)
+      -> Maybe<PackedFunctor<typename PackedFunctorMaker<R(Args...)>::FType>> {
+    auto* functors = PackedFuncCreatorMap<typename PackedFunctorMaker<R(Args...)>::FType>::Get();
+    const auto& it = functors->find(func_name);
+    CHECK_OR_RETURN(it != functors->end())
+        << Error::RuntimeError() << "Functor was not found for \"" << func_name
+        << "\", please check whether the functor has been registered correctly or not.";
     return it->second();
   }
 
@@ -55,7 +86,15 @@ class FunctionLibrary {
  private:
   FunctionLibrary() = default;
 
-  HashMap<std::string, FunctorCreator> functors_;
+  template<typename Func, typename Creator>
+  void add_functor_creator(const std::string& func_name, Creator creator) {
+    using func_type = typename function_traits<Func>::func_type;
+    auto* functors = PackedFuncCreatorMap<typename PackedFunctorMaker<func_type>::FType>::Get();
+    CHECK_OR_THROW(functors->count(func_name) == 0)
+        << Error::RuntimeError() << "The functor with name " << func_name
+        << " has been registered more than once.";
+    functors->emplace(func_name, creator);
+  }
 };
 
 #define ONEFLOW_FUNCTION_LIBRARY(m) ONEFLOW_FUNCTION_LIBRARY_IMPL(m, __COUNTER__)

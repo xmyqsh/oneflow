@@ -16,7 +16,10 @@ limitations under the License.
 
 #include "oneflow/core/framework/tensor.h"
 #include "oneflow/core/framework/dtype.h"
+#include "oneflow/core/framework/tensor_arg.h"
 #include "oneflow/core/autograd/autograd_meta.h"
+#include "oneflow/core/eager/eager_blob_object.h"
+#include "oneflow/core/eager/tensor_storage.h"
 #include "oneflow/core/functional/functional.h"
 
 namespace oneflow {
@@ -24,16 +27,20 @@ namespace oneflow {
 namespace one {
 
 TensorInfo::TensorInfo(const Tensor& tensor) : shape_(tensor.shape()), dtype_(tensor.dtype()) {
-  if (TRY(tensor.device()).IsOk()) { device_ = CHECK_JUST(tensor.device()); }
-  if (TRY(tensor.parallel_desc()).IsOk()) { parallel_desc_ = CHECK_JUST(tensor.parallel_desc()); }
-  if (TRY(tensor.nd_sbp()).IsOk()) { nd_sbp_ = CHECK_JUST(tensor.nd_sbp()); }
+  if (tensor.is_global()) {
+    parallel_desc_ = CHECK_JUST(tensor.parallel_desc());
+    nd_sbp_ = CHECK_JUST(tensor.nd_sbp());
+  } else {
+    device_ = CHECK_JUST(tensor.device());
+  }
 }
 
-Maybe<const std::vector<Symbol<cfg::SbpParallel>>&> GetSbpTuple(Symbol<cfg::NdSbp> nd_sbp) {
-  static thread_local HashMap<Symbol<cfg::NdSbp>, std::vector<Symbol<cfg::SbpParallel>>> map;
+Maybe<const std::vector<Symbol<SbpParallel>>&> GetSbpTuple(Symbol<NdSbp> nd_sbp) {
+  static thread_local HashMap<Symbol<NdSbp>, std::vector<Symbol<SbpParallel>>> map;
   auto iter = map.find(nd_sbp);
   if (iter == map.end()) {
-    std::vector<Symbol<cfg::SbpParallel>> sbp_tuple;
+    std::vector<Symbol<SbpParallel>> sbp_tuple;
+    sbp_tuple.reserve(nd_sbp->sbp_parallel().size());
     for (const auto& sbp_parallel : nd_sbp->sbp_parallel()) {
       sbp_tuple.push_back(SymbolOf(sbp_parallel));
     }
@@ -44,23 +51,53 @@ Maybe<const std::vector<Symbol<cfg::SbpParallel>>&> GetSbpTuple(Symbol<cfg::NdSb
 
 Maybe<Tensor> TensorInfo::zeros() const {
   if (device_.has_value()) {
-    const auto& device = JUST(device_.value());
+    const auto& device = JUST(device_);
     return functional::Constant(*shape_.get(), 0, dtype_, device);
   } else {
-    const auto& parallel_desc = JUST(parallel_desc_.value());
-    const auto& nd_sbp = JUST(nd_sbp_.value());
+    const auto& parallel_desc = JUST(parallel_desc_);
+    const auto& nd_sbp = JUST(nd_sbp_);
     const auto& sbp_tuple = JUST(GetSbpTuple(nd_sbp));
-    return functional::ConsistentConstant(*shape_.get(), 0, dtype_, parallel_desc, sbp_tuple);
+    return functional::GlobalConstant(*shape_.get(), 0, dtype_, parallel_desc, sbp_tuple);
   }
 }
 
+AutogradMeta::AutogradMeta(bool requires_grad, bool is_leaf)
+    : is_leaf_(is_leaf),
+      requires_grad_(requires_grad),
+      retain_grad_(false),
+      current_grad_(new TensorArg) {}
+
 Maybe<void> AutogradMeta::set_acc_grad(const std::shared_ptr<Tensor>& grad) {
+  // NOTE(daquexian): update here if we support remat on global tensors
+  if (grad && acc_grad_ != nullptr && acc_grad_->is_eager() && acc_grad_->is_local()) {
+    // set old acc_grad evictable
+    if (auto rematable_storage = std::dynamic_pointer_cast<vm::RematableTensorStorage>(
+            JUST(acc_grad_->eager_blob_object())->tensor_storage())) {
+      rematable_storage->set_eviction_disabled(false);
+    }
+  }
   if (const auto& static_zeros_tensor = std::dynamic_pointer_cast<StaticZerosTensor>(grad)) {
-    acc_grad_ = JUST(static_zeros_tensor->AsMirroredTensor());
+    acc_grad_ = JUST(static_zeros_tensor->AsLocalTensor());
   } else {
     acc_grad_ = grad;
   }
+  if (acc_grad_ != nullptr && acc_grad_->is_eager() && acc_grad_->is_local()) {
+    // set new acc_grad non-evictable
+    if (auto rematable_storage = std::dynamic_pointer_cast<vm::RematableTensorStorage>(
+            JUST(acc_grad_->eager_blob_object())->tensor_storage())) {
+      rematable_storage->set_eviction_disabled(true);
+    }
+  }
   return Maybe<void>::Ok();
+}
+
+Maybe<Tensor> AutogradMeta::current_grad_value() const {
+  std::shared_ptr<Tensor> res = JUST(current_grad_->GetAccTensor());
+  for (const auto& hook : hooks_) {
+    const auto& new_tensor = hook(res);
+    if (new_tensor) { res = new_tensor; }
+  }
+  return res;
 }
 
 }  // namespace one

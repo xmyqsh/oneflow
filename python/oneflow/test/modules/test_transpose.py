@@ -14,19 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from cgi import test
 import unittest
 from collections import OrderedDict
 
 import numpy as np
-from automated_test_util import *
-from test_util import GenArgList
+from random import shuffle
+
+from oneflow.test_utils.automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
 
 
 def _test_transpose(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     of_out = flow.transpose(input, 0, 1)
@@ -35,7 +38,7 @@ def _test_transpose(test_case, device):
 
 
 def _test_tensor_transpose(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     of_out = input.transpose(0, 1)
@@ -44,7 +47,7 @@ def _test_tensor_transpose(test_case, device):
 
 
 def _test_tranpose_negative_dim(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     of_out = flow.transpose(input, -4, -3)
@@ -53,7 +56,7 @@ def _test_tranpose_negative_dim(test_case, device):
 
 
 def _test_transpose_backward(test_case, device):
-    x = flow.Tensor(
+    x = flow.tensor(
         np.random.randn(2, 6, 5, 3),
         dtype=flow.float32,
         device=flow.device(device),
@@ -67,7 +70,7 @@ def _test_transpose_backward(test_case, device):
 
 
 def _test_transpose_backward_v2(test_case, device):
-    x = flow.Tensor(
+    x = flow.tensor(
         np.random.randn(2, 3, 4, 5),
         dtype=flow.float32,
         device=flow.device(device),
@@ -95,17 +98,34 @@ class TestTranspose(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest()
+    @autotest(n=10, check_graph=True)
     def test_transpose_flow_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(ndim=4).to(device)
+        x = random_tensor(ndim=4).to(device)
         y = torch.transpose(x, dim0=random(1, 3).to(int), dim1=random(1, 3).to(int))
         return y
 
-    @autotest(auto_backward=False)
-    def test_transpose_with_0shape_data(test_case):
+    @autotest(n=10, check_graph=True)
+    def test_transpose_with_stride(test_case):
         device = random_device()
-        x = random_pytorch_tensor(4, 2, 3, 0, 4).to(device)
+        x = random_tensor(ndim=4).to(device)
+        permute_list = [0, 1, 2, 3]
+        shuffle(permute_list)
+        x = x.permute(permute_list)
+        y = torch.transpose(x, dim0=random(1, 3).to(int), dim1=random(1, 3).to(int))
+        return y
+
+    @autotest(n=10, auto_backward=False, check_graph=True)
+    def test_transpose_with_0_size_data(test_case):
+        device = random_device()
+        x = random_tensor(4, 2, 3, 0, 4).to(device)
+        y = torch.transpose(x, dim0=random(1, 3).to(int), dim1=random(1, 3).to(int))
+        return y
+
+    @autotest(n=10, auto_backward=False, check_graph=True)
+    def test_transpose_flow_bool_with_random_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=4).to(device=device, dtype=torch.bool)
         y = torch.transpose(x, dim0=random(1, 3).to(int), dim1=random(1, 3).to(int))
         return y
 

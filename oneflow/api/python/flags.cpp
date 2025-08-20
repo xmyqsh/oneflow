@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/api/python/of_api_registry.h"
+#ifdef WITH_CUDA
+#include <cuda.h>
+#endif
 
 namespace oneflow {
 
@@ -26,6 +29,30 @@ ONEFLOW_API_PYBIND11_MODULE("flags", m) {
 #endif  // WITH_CUDA
   });
 
+  m.def("with_npu", []() {
+#ifdef WITH_NPU
+    return true;
+#else
+    return false;
+#endif  // WITH_NPU
+  });
+
+  m.def("with_mlu", []() {
+#ifdef WITH_MLU
+    return true;
+#else
+    return false;
+#endif  // WITH_MLU
+  });
+
+  m.def("cuda_version", []() {
+#ifdef WITH_CUDA
+    return CUDA_VERSION;
+#else
+    return 0;
+#endif  // WITH_CUDA
+  });
+
   m.def("use_cxx11_abi", []() {
 #if _GLIBCXX_USE_CXX11_ABI == 1
     return true;
@@ -34,12 +61,20 @@ ONEFLOW_API_PYBIND11_MODULE("flags", m) {
 #endif  // _GLIBCXX_USE_CXX11_ABI
   });
 
-  m.def("with_xla", []() {
-#ifdef WITH_XLA
+  m.def("with_mlir", []() {
+#ifdef WITH_MLIR
     return true;
 #else
     return false;
-#endif  // WITH_XLA
+#endif  // WITH_MLIR
+  });
+
+  m.def("with_mlir_cuda_codegen", []() {
+#ifdef WITH_MLIR_CUDA_CODEGEN
+    return true;
+#else
+    return false;
+#endif  // WITH_MLIR_CUDA_CODEGEN
   });
 
   m.def("with_rdma", []() {

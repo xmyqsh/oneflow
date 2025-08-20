@@ -19,21 +19,33 @@ from collections import OrderedDict
 
 import numpy as np
 from scipy import special
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestErfcModule(flow.unittest.TestCase):
-    @autotest()
+    @autotest(n=5)
     def test_flow_erfc_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = torch.erfc(x)
         return y
+
+    @autotest(n=5)
+    def test_flow_erfc_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = torch.erfc(x)
+        return y
+
+    @profile(torch.erfc)
+    def profile_erfc(test_case):
+        torch.erfc(torch.ones(100000))
 
 
 if __name__ == "__main__":

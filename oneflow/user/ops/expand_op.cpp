@@ -14,73 +14,98 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/framework/framework.h"
+#include "oneflow/core/framework/op_generated.h"
+#include "oneflow/core/job/nd_sbp_util.h"
 
 namespace oneflow {
 
-REGISTER_USER_OP("expand")
-    .Input("in")
-    .Output("out")
-    .Attr<std::vector<int32_t>>("in_shape")
-    .Attr<std::vector<int32_t>>("out_shape")
-    .Attr<std::vector<int32_t>>("stride")
-    .SetTensorDescInferFn([](user_op::InferContext* ctx) -> Maybe<void> {
-      Shape* out_shape = ctx->OutputShape("out", 0);
-      const auto& out_shape_attr = ctx->Attr<std::vector<int32_t>>("out_shape");
-      DimVector dim_vec(out_shape_attr.begin(), out_shape_attr.end());
-      *out_shape = Shape(dim_vec);
-      return Maybe<void>::Ok();
-    })
-    .SetDataTypeInferFn([](user_op::InferContext* ctx) -> Maybe<void> {
-      *ctx->OutputDType("out", 0) = ctx->InputDType("in", 0);
-      return Maybe<void>::Ok();
-    })
-    .SetGetSbpFn([](user_op::SbpContext* ctx) -> Maybe<void> {
-      ctx->NewBuilder()
-          .PartialSum(user_op::OpArg("in", 0))
-          .PartialSum(user_op::OpArg("out", 0))
-          .Build();
-      return Maybe<void>::Ok();
-    });
+namespace {
 
-REGISTER_USER_OP("expand_grad")
-    .Input("in")
-    .Output("out")
-    .Attr<std::vector<int32_t>>("out_shape")
-    .Attr<std::vector<int32_t>>("stride")
-    .SetTensorDescInferFn([](user_op::InferContext* ctx) -> Maybe<void> {
-      Shape* out_shape = ctx->OutputShape("out", 0);
-      const auto& out_shape_attr = ctx->Attr<std::vector<int32_t>>("out_shape");
-      DimVector dim_vec(out_shape_attr.begin(), out_shape_attr.end());
-      *out_shape = Shape(dim_vec);
-      return Maybe<void>::Ok();
-    })
-    .SetDataTypeInferFn([](user_op::InferContext* ctx) -> Maybe<void> {
-      *ctx->OutputDType("out", 0) = ctx->InputDType("in", 0);
-      return Maybe<void>::Ok();
-    })
-    .SetGetSbpFn([](user_op::SbpContext* ctx) -> Maybe<void> {
-      ctx->NewBuilder()
-          .PartialSum(user_op::OpArg("in", 0))
-          .PartialSum(user_op::OpArg("out", 0))
-          .Build();
-      return Maybe<void>::Ok();
-    });
+Maybe<void> InferExpandOutputStride(const Shape& input_shape, const Stride& input_stride,
+                                    const Shape& expand_shape, Stride* output_stride) {
+  CHECK_EQ_OR_RETURN(input_shape.size(), input_stride.size());  // NOLINT(maybe-need-error-msg)
+  size_t lpad = expand_shape.size() - input_shape.size();
+  CHECK_GE_OR_RETURN(lpad, 0);  // NOLINT(maybe-need-error-msg)
 
-REGISTER_USER_OP_GRAD("expand").SetGenBackwardOpConfFn([](const user_op::UserOpWrapper& op,
-                                                          user_op::AddOpFn AddOp) -> Maybe<void> {
-  if (op.NeedGenGradTensor4OpInput("in", 0)) {
-    user_op::UserOpConfWrapperBuilder builder(op.op_name() + "_grad");
-    user_op::UserOpConfWrapper grad_op =
-        builder.Op("expand_grad")
-            .Input("in", op.GetGradTensorWithOpOutput("out", 0))
-            .Output("out")
-            .Attr<std::vector<int32_t>>("out_shape", op.attr<std::vector<int32_t>>("in_shape"))
-            .Attr<std::vector<int32_t>>("stride", op.attr<std::vector<int32_t>>("stride"))
-            .Build();
-    op.BindGradTensorWithOpInput(grad_op.output("out", 0), "in", 0);
-    AddOp(grad_op);
+  output_stride->resize(expand_shape.size(), 0);
+  for (int i = expand_shape.size() - 1; i >= 0; --i) {
+    int64_t dim = i < lpad ? 1 : input_shape[i - lpad];
+    if (dim == expand_shape[i]) {
+      if (i >= lpad) {
+        output_stride->at(i) = input_stride[i - lpad];
+      } else if (i < expand_shape.size() - 1) {
+        output_stride->at(i) = output_stride->at(i + 1) * expand_shape[i + 1];
+      }
+    } else {
+      CHECK_EQ_OR_RETURN(dim, 1);  // NOLINT(maybe-need-error-msg)
+    }
   }
+  // NOTE: expand op only can output contiguous stride,
+  // because lazy don't support to_contiguous op for now
+  *output_stride = Stride(expand_shape);
   return Maybe<void>::Ok();
-});
+}
+
+}  // namespace
+
+/* static */ Maybe<void> ExpandOp::InferLogicalTensorDesc(user_op::InferContext* ctx) {
+  const Shape& input_shape = ctx->InputShape("in", 0);
+  const Stride& input_stride = ctx->InputStride("in", 0);
+  const Shape& expand_shape = ctx->Attr<Shape>("expand_shape");
+
+  ctx->SetOutputShape("out", 0, expand_shape);
+
+  Stride output_stride;
+  JUST(InferExpandOutputStride(input_shape, input_stride, expand_shape, &output_stride));
+  ctx->SetOutputStride("out", 0, output_stride);
+  return Maybe<void>::Ok();
+}
+
+/*static*/ Maybe<void> ExpandOp::InferPhysicalTensorDesc(user_op::InferContext* ctx) {
+  const Shape& input_shape = ctx->InputShape("in", 0);
+  const Stride& input_stride = ctx->InputStride("in", 0);
+
+  const auto& global_expand_shape = ctx->Attr<Shape>("expand_shape");
+  const auto& output_sbp = ctx->NdSbp4ArgNameAndIndex("out", 0);
+  const auto& device_mesh = *ctx->parallel_desc().hierarchy();
+  const auto& rank = ctx->parallel_ctx().parallel_id();
+  const auto local_view =
+      GetTensorSliceView4ParallelId(device_mesh, output_sbp, global_expand_shape, rank);
+  const auto& local_expand_shape = local_view.shape();
+  ctx->SetOutputShape("out", 0, local_expand_shape);
+
+  Stride output_stride;
+  JUST(InferExpandOutputStride(input_shape, input_stride, local_expand_shape, &output_stride));
+  ctx->SetOutputStride("out", 0, output_stride);
+  return Maybe<void>::Ok();
+}
+
+/* static */ Maybe<void> ExpandOp::GetSbp(user_op::SbpContext* ctx) {
+  const auto& global_in_shape = ctx->LogicalTensorDesc4InputArgNameAndIndex("in", 0).shape();
+  const auto& global_expand_shape = ctx->Attr<Shape>("expand_shape");
+  size_t lpad = global_expand_shape.size() - global_in_shape.size();
+  CHECK_GE_OR_RETURN(lpad, 0);  // NOLINT(maybe-need-error-msg)
+
+  for (size_t i = 0; i < global_in_shape.size(); ++i) {
+    if (global_in_shape[i] == global_expand_shape[i + lpad]) {
+      ctx->NewBuilder()
+          .Split(user_op::OpArg("in", 0), i)
+          .Split(user_op::OpArg("out", 0), i + lpad)
+          .Build();
+    }
+  }
+
+  ctx->NewBuilder()
+      .PartialSum(user_op::OpArg("in", 0))
+      .PartialSum(user_op::OpArg("out", 0))
+      .Build();
+
+  return Maybe<void>::Ok();
+}
+
+/* static */ Maybe<void> ExpandOp::InferDataType(user_op::InferContext* ctx) {
+  ctx->SetOutputDType("out", 0, ctx->InputDType("in", 0));
+  return Maybe<void>::Ok();
+}
 
 }  // namespace oneflow

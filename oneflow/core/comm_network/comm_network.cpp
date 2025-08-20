@@ -74,17 +74,17 @@ void CommNet::AddWorkToStream(void* actor_read_id, const std::function<void()>& 
     ready_cbs_.Send(cb);
   } else {
     CommNetItem work_item(is_read, cb);
-    actor_read_ctx->waiting_list.push_back(work_item);
+    actor_read_ctx->waiting_list.emplace_back(work_item);
   }
   if (is_read) {
     CommNetItem empty_cb;
-    actor_read_ctx->waiting_list.push_back(empty_cb);
+    actor_read_ctx->waiting_list.emplace_back(empty_cb);
   }
 }
 
 CommNet::CommNet() {
   int64_t this_machine_id = GlobalProcessCtx::Rank();
-  for (int64_t i : Global<ResourceDesc, ForSession>::Get()->process_ranks()) {
+  for (int64_t i : Singleton<ResourceDesc, ForSession>::Get()->process_ranks()) {
     if (i == this_machine_id) { continue; }
     peer_machine_id_.insert(i);
   }

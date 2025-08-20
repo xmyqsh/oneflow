@@ -21,18 +21,22 @@ limitations under the License.
 
 namespace oneflow {
 
+namespace vm {
+class EagerBlobObject;
+}
+
 class MemoryAllocator final {
  public:
   OF_DISALLOW_COPY_AND_MOVE(MemoryAllocator);
   MemoryAllocator() = default;
   ~MemoryAllocator();
 
-  char* Allocate(MemoryCase mem_case, std::size_t size);
+  char* Allocate(const MemoryCase& mem_case, std::size_t size);
   template<typename T>
   T* PlacementNew(T* mem_ptr);
 
  private:
-  void Deallocate(char* dptr, MemoryCase mem_case);
+  void Deallocate(char* dptr, const MemoryCase& mem_case);
 
   std::mutex deleters_mutex_;
   std::list<std::function<void()>> deleters_;
@@ -40,6 +44,8 @@ class MemoryAllocator final {
 
 class Blob;
 void InitNonPODTypeBlobIfNeed(MemoryAllocator* allocator, Blob* blob_ptr);
+void InitNonPODTypeEagerBlobObjectIfNeed(MemoryAllocator* allocator,
+                                         vm::EagerBlobObject* eager_blob_object_ptr);
 
 template<typename T>
 T* MemoryAllocator::PlacementNew(T* mem_ptr) {
@@ -53,8 +59,8 @@ T* MemoryAllocator::PlacementNew(T* mem_ptr) {
 }
 
 struct MemoryAllocatorImpl final {
-  static void* Allocate(MemoryCase mem_case, size_t size);
-  static void Deallocate(void* ptr, MemoryCase mem_case);
+  static void* Allocate(const MemoryCase& mem_case, size_t size);
+  static void Deallocate(void* ptr, const MemoryCase& mem_case);
   static void* AllocateUnPinnedHostMem(size_t size);
   static void DeallocateUnPinnedHostMem(void* ptr);
 };

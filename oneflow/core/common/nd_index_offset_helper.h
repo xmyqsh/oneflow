@@ -24,6 +24,8 @@ namespace oneflow {
 template<typename T, int N>
 class NdIndexOffsetHelper {
  public:
+  OF_DEVICE_FUNC NdIndexOffsetHelper() = default;
+
   template<class... Ts>
   OF_DEVICE_FUNC explicit NdIndexOffsetHelper(T d0, Ts... dims) {
     constexpr int n = 1 + sizeof...(dims);
@@ -34,17 +36,32 @@ class NdIndexOffsetHelper {
 
   OF_DEVICE_FUNC explicit NdIndexOffsetHelper(const T* dims) { InitStrides(dims, N); }
 
+  template<typename U>
+  OF_DEVICE_FUNC explicit NdIndexOffsetHelper(const U* dims) {
+    T dims_arr[N];
+    for (int i = 0; i < N; ++i) { dims_arr[i] = dims[i]; }
+    InitStrides(dims_arr, N);
+  }
+
   OF_DEVICE_FUNC explicit NdIndexOffsetHelper(const T* dims, int n) { InitStrides(dims, n); }
 
-  ~NdIndexOffsetHelper() = default;
+  template<typename U>
+  OF_DEVICE_FUNC explicit NdIndexOffsetHelper(const U* dims, int n) {
+    T dims_arr[N];
+    for (int i = 0; i < N; ++i) {
+      if (i < n) { dims_arr[i] = dims[i]; }
+    }
+    InitStrides(dims_arr, n);
+  }
+
+  virtual ~NdIndexOffsetHelper() = default;
 
   OF_DEVICE_FUNC T NdIndexToOffset(const T* index) const {
     T offset = 0;
 #ifdef __CUDA_ARCH__
 #pragma unroll
 #endif
-    for (int i = 0; i < N - 1; ++i) { offset += index[i] * stride_[i]; }
-    offset += index[N - 1];
+    for (int i = 0; i < N; ++i) { offset += index[i] * stride_[i]; }
     return offset;
   }
 
@@ -54,7 +71,9 @@ class NdIndexOffsetHelper {
 #ifdef __CUDA_ARCH__
 #pragma unroll
 #endif
-    for (int i = 0; i < n; ++i) { offset += index[i] * stride_[i]; }
+    for (int i = 0; i < N; ++i) {
+      if (i < n) { offset += index[i] * stride_[i]; }
+    }
     return offset;
   }
 
@@ -95,10 +114,12 @@ class NdIndexOffsetHelper {
 #ifdef __CUDA_ARCH__
 #pragma unroll
 #endif
-    for (int i = 0; i < n; ++i) {
-      const T idx = remaining / stride_[i];
-      index[i] = idx;
-      remaining = remaining - idx * stride_[i];
+    for (int i = 0; i < N; ++i) {
+      if (i < n) {
+        const T idx = remaining / stride_[i];
+        index[i] = idx;
+        remaining = remaining - idx * stride_[i];
+      }
     }
   }
 
@@ -125,13 +146,43 @@ class NdIndexOffsetHelper {
 
   OF_DEVICE_FUNC constexpr int Size() const { return N; }
 
- private:
+ protected:
   OF_DEVICE_FUNC void InitStrides(const T* dims, const int n) {
     for (int i = n - 1; i < N; ++i) { stride_[i] = 1; }
     for (int i = n - 2; i >= 0; --i) { stride_[i] = dims[i + 1] * stride_[i + 1]; }
   }
 
   T stride_[N];
+};
+
+template<typename T, int N>
+class NdIndexStrideOffsetHelper : public NdIndexOffsetHelper<T, N> {
+ public:
+  OF_DEVICE_FUNC NdIndexStrideOffsetHelper() = default;
+  OF_DEVICE_FUNC explicit NdIndexStrideOffsetHelper(const T* strides) {
+    for (int i = 0; i < N; ++i) { stride_[i] = strides[i]; }
+  }
+
+  template<typename U>
+  OF_DEVICE_FUNC explicit NdIndexStrideOffsetHelper(const U* strides) {
+    for (int i = 0; i < N; ++i) { stride_[i] = static_cast<T>(strides[i]); }
+  }
+
+  OF_DEVICE_FUNC explicit NdIndexStrideOffsetHelper(const T* strides, int n) {
+    for (int i = 0; i < N; ++i) {
+      if (i < n) { stride_[i] = strides[i]; }
+    }
+  }
+
+  template<typename U>
+  OF_DEVICE_FUNC explicit NdIndexStrideOffsetHelper(const U* strides, int n) {
+    for (int i = 0; i < N; ++i) {
+      if (i < n) { stride_[i] = static_cast<T>(strides[i]); }
+    }
+  }
+
+ private:
+  using NdIndexOffsetHelper<T, N>::stride_;
 };
 
 }  // namespace oneflow

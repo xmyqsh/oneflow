@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/graph/compute_task_node.h"
-#include "oneflow/core/framework/framework.h"
+#include "oneflow/core/graph/task_stream_index_manager.h"
 
 namespace oneflow {
 
@@ -26,6 +26,7 @@ class RepeatCompTaskNode final : public CompTaskNode {
 
   void ProduceAllRegstsAndBindEdges() override;
   void ConsumeAllRegsts() override;
+  void ConsumeFakeRegsts() override;
 
   TaskType GetTaskType() const override { return TaskType::kRepeat; }
 
@@ -37,21 +38,34 @@ void RepeatCompTaskNode::ConsumeAllRegsts() {
   ConsumeRegst("in", SoleInDataEdge()->GetSoleRegst());
 }
 
+void RepeatCompTaskNode::ConsumeFakeRegsts() { ConsumeFakeRegst("in"); }
+
 void RepeatCompTaskNode::ProduceAllRegstsAndBindEdges() {
   std::shared_ptr<RegstDesc> out_regst = ProduceRegst("out", false, 1, 1);
   ForEachOutDataEdge([&](TaskEdge* edge) { edge->AddRegst("out", out_regst); });
 }
 
 void RepeatCompTaskNode::BuildExecGphAndRegst() {
+  std::shared_ptr<RegstDesc> in_regst = GetSoleConsumedRegst("in");
   ExecNode* node = mut_exec_gph().NewNode();
   std::shared_ptr<const Operator> sole_op = op();
   node->mut_op() = sole_op;
-  node->BindBnWithRegst(sole_op->SoleIbn(), GetSoleConsumedRegst("in"));
+  node->BindBnWithRegst(sole_op->SoleIbn(), in_regst);
   std::shared_ptr<RegstDesc> out_regst = GetProducedRegst("out");
   out_regst->AddLbi(sole_op->BnInOp2Lbi(sole_op->SoleObn()));
   node->BindBnWithRegst(sole_op->SoleObn(), out_regst);
-  node->InferBlobDescs(parallel_ctx());
+  (node->*GetInferBlobDescsMethod())(parallel_ctx());
+
+  // NOTE(chengcheng): force inplace
+  CHECK_EQ(in_regst->NumOfLbi(), 1);
+  CHECK_EQ(out_regst->NumOfLbi(), 1);
+  CHECK_EQ(in_regst->min_register_num(), 1);
+  // NOTE(chengcheng): input need unreused mem
+  in_regst->set_enable_reuse_mem(false);
+  out_regst->set_force_inplace_consumed_regst_desc_id(in_regst->regst_desc_id());
 }
+
+REGISTER_COMP_TASK_STREAM_INDEX_GETTER(TaskType::kRepeat);
 
 REGISTER_USER_OP_COMP_TASK_NODE_TYPE("repeat", RepeatCompTaskNode);
 

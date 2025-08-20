@@ -18,16 +18,20 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_expm1_impl(test_case, device, shape):
-    x = flow.Tensor(
-        np.random.randn(*shape), device=flow.device(device), requires_grad=True
+    x = flow.tensor(
+        np.random.randn(*shape),
+        dtype=flow.float32,
+        device=flow.device(device),
+        requires_grad=True,
     )
     of_out = flow.expm1(x)
     np_out = np.expm1(x.numpy())
@@ -47,19 +51,30 @@ class TestExpm1Module(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest()
+    @autotest(n=5, check_graph=True)
     def test_expm1_flow_with_random_data(test_case):
         device = random_device()
-        input = random_pytorch_tensor().to(device)
+        input = random_tensor().to(device)
         y = torch.expm1(input)
         return y
 
-    @autotest(auto_backward=False)
-    def test_expm1_with_0shape_data(test_case):
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_expm1_with_0_size_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(4, 2, 1, 0, 3).to(device)
+        x = random_tensor(4, 2, 1, 0, 3).to(device)
         y = torch.expm1(x)
         return y
+
+    @autotest(n=5, check_graph=True)
+    def test_expm1_flow_with_0dim_data(test_case):
+        device = random_device()
+        input = random_tensor(ndim=0).to(device)
+        y = torch.expm1(input)
+        return y
+
+    @profile(torch.expm1)
+    def profile_expm1(test_case):
+        torch.expm1(torch.ones(100000))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ limitations under the License.
 */
 #include "oneflow/core/operator/operator.h"
 #include "oneflow/core/common/balanced_splitter.h"
-#include "oneflow/core/job/foreign_callback.h"
 #include "oneflow/core/vm/symbol_storage.h"
 #include "oneflow/core/job/scope.h"
 
@@ -39,14 +38,14 @@ class DistributeConcatOp final : public Operator {
  private:
   Maybe<void> InferBlobParallelDesc() override;
   Maybe<void> InferSbpSignature(
-      cfg::SbpSignature* sbp_signature, const cfg::SbpSignature& sbp_sig_conf,
-      const std::function<int32_t(const cfg::SbpSignature&)>& CalcOrderValue4SbpSig,
+      SbpSignature* sbp_signature, const SbpSignature& sbp_sig_conf,
+      const std::function<int32_t(const SbpSignature&)>& CalcOrderValue4SbpSig,
       std::function<Maybe<const SbpInferHint*>(const std::string&)> SbpInferHint4Ibn,
       const ParallelDesc& parallel_desc) const override;
 
   Maybe<void> GetSbpSignatures(
       const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-      cfg::SbpSignatureList* sbp_sig_list) const override;
+      SbpSignatureList* sbp_sig_list) const override;
 
   int32_t FixAxis(const int32_t axis, const int64_t num_axes) const;
 };
@@ -78,7 +77,9 @@ Maybe<void> DistributeConcatOp::InferLogicalOutBlobDescs(
     }
     CHECK_EQ_OR_RETURN(in_i->data_type(), out->data_type());
   }
-  out->mut_shape().Set(concat_axis, concat_dim_size);
+  Shape output = out->shape();
+  output.Set(concat_axis, concat_dim_size);
+  out->set_shape(output);
   out->set_is_dynamic(false);
   return Maybe<void>::Ok();
 }
@@ -121,7 +122,7 @@ Maybe<void> DistributeConcatOp::InferOutBlobDescs(
   }
   BlobDesc* out_blob_desc = GetBlobDesc4BnInOp("out");
   *out_blob_desc = *first_blob_desc;
-  out_blob_desc->mut_shape() = Shape(out_dim_vec);
+  out_blob_desc->set_shape(Shape(out_dim_vec));
   out_blob_desc->set_is_dynamic(false);
   return Maybe<void>::Ok();
 }
@@ -143,8 +144,8 @@ Maybe<void> DistributeConcatOp::InferBlobParallelDesc() {
 }
 
 Maybe<void> DistributeConcatOp::InferSbpSignature(
-    cfg::SbpSignature* sbp_signature, const cfg::SbpSignature& sbp_sig_conf,
-    const std::function<int32_t(const cfg::SbpSignature&)>& CalcOrderValue4SbpSig,
+    SbpSignature* sbp_signature, const SbpSignature& sbp_sig_conf,
+    const std::function<int32_t(const SbpSignature&)>& CalcOrderValue4SbpSig,
     std::function<Maybe<const SbpInferHint*>(const std::string&)> SbpInferHint4Ibn,
     const ParallelDesc& parallel_desc) const {
   CHECK_EQ_OR_RETURN(parallel_desc.parallel_num(), input_bns().size());
@@ -169,7 +170,7 @@ Maybe<void> DistributeConcatOp::InferSbpSignature(
                          bs.At(i).size());
     }
   }
-  cfg::SbpSignatureList sbp_sig_list;
+  SbpSignatureList sbp_sig_list;
   JUST(GetSbpSignatures(LogicalBlobDesc4Ibn, &sbp_sig_list));
   *sbp_signature = sbp_sig_list.sbp_signature().Get(0);
   return Maybe<void>::Ok();
@@ -177,7 +178,7 @@ Maybe<void> DistributeConcatOp::InferSbpSignature(
 
 Maybe<void> DistributeConcatOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   const auto& conf = op_conf().distribute_concat_conf();
   const int64_t num_axes = JUST(LogicalBlobDesc4Ibn(input_bns().Get(0))).shape().NumAxes();
   const int32_t axis = FixAxis(conf.axis(), num_axes);

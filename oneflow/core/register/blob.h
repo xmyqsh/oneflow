@@ -16,7 +16,6 @@ limitations under the License.
 #ifndef ONEFLOW_CORE_REGISTER_BLOB_H_
 #define ONEFLOW_CORE_REGISTER_BLOB_H_
 
-#include "oneflow/core/device/device_context.h"
 #include "oneflow/core/job/resource.pb.h"
 #include "oneflow/core/memory/memory_case.pb.h"
 #include "oneflow/core/register/blob_desc.h"
@@ -50,11 +49,19 @@ class Blob final {
   OF_DISALLOW_COPY_AND_MOVE(Blob);
   Blob(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr);
   Blob(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr, char* body_ptr);
+  Blob(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr, char* body_ptr,
+       const int64_t offset);
   virtual ~Blob() = default;
 
   DataType data_type() const { return blob_desc_->data_type(); }
+  MemoryFormat memory_format() const { return blob_desc_->memory_format(); }
   const char* header_ptr() const { return header_ptr_; }
-  char* mut_header_ptr() { return header_ptr_; }
+  [[deprecated(
+      "\"mut_header_ptr\" will be removed in Bolb. Please avoid to use this method whenever "
+      "possible. Almost all methods of `mut_header_ptr` are also in `Blob`.")]] char*
+  mut_header_ptr() {
+    return header_ptr_;
+  }
   char* mut_contiguous_header_ptr();
   const BlobDesc& blob_desc() const { return *blob_desc_; }
   const BlobDesc* blob_desc_ptr() const { return blob_desc_; }
@@ -62,19 +69,35 @@ class Blob final {
   template<typename T = void>
   const T* dptr() const {
     CheckDataType<T>(data_type());
-    return static_cast<const T*>(dptr_);
+    return reinterpret_cast<T*>(static_cast<char*>(dptr_)
+                                + storage_offset_ * GetSizeOfDataType(data_type()));
   }
   template<typename T = void>
   T* mut_dptr() {
     this->blob_access_checker()->CheckBodyMutable();
     CheckDataType<T>(data_type());
-    return static_cast<T*>(dptr_);
+    return reinterpret_cast<T*>(static_cast<char*>(dptr_)
+                                + storage_offset_ * GetSizeOfDataType(data_type()));
   }
   template<typename T = void>
   T* ForceMutDptr() {
     CheckDataType<T>(data_type());
+    return reinterpret_cast<T*>(static_cast<char*>(dptr_)
+                                + storage_offset_ * GetSizeOfDataType(data_type()));
+  }
+  template<typename T = void>
+  const T* raw_dptr() const {
+    CheckDataType<T>(data_type());
     return static_cast<T*>(dptr_);
   }
+  template<typename T = void>
+  T* mut_raw_dptr() {
+    this->blob_access_checker()->CheckBodyMutable();
+    CheckDataType<T>(data_type());
+    return static_cast<T*>(dptr_);
+  }
+
+  // shape
   const Shape& static_shape() const { return blob_desc_->shape(); }
   const ShapeView& shape_view() const { return *shape_view_; }
   const ShapeView& shape() const { return *shape_view_; }
@@ -82,14 +105,14 @@ class Blob final {
     this->blob_access_checker()->CheckHeaderMutable();
     return mut_shape_view_.get();
   }
-
   MutShapeView* ForceMutShapeView() { return mut_shape_view_.get(); }
+
+  // stride
+  const Stride& stride() const { return blob_desc_->stride(); }
 
   void reset_dptr(char* dptr) { dptr_ = dptr; }
 
-  void CopyDataContentFrom(DeviceCtx* device_ctx, const Blob* rhs);
-  void CopyValidDataContentFrom(DeviceCtx* device_ctx, const Blob* rhs);
-  void CopyHeaderFrom(DeviceCtx* device_ctx, const Blob* rhs);
+  void CopyHeaderFrom(const Blob* rhs);
   bool IsBodyEmpty() const { return shape().elem_cnt() == 0; }
 
   size_t AlignedTotalByteSize() const { return blob_desc_->AlignedTotalByteSize(); }
@@ -105,20 +128,21 @@ class Blob final {
   const BlobAccessChecker* blob_access_checker() { return this->blob_access_checker_; }
 
  private:
-  void Init(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr,
-            char* body_ptr);
+  void Init(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr, char* body_ptr,
+            const int64_t offset);
 
   const BlobAccessChecker* blob_access_checker_;
   MemoryCase mem_case_;
   const BlobDesc* blob_desc_;
   void* dptr_;
   char* header_ptr_;
+  int64_t storage_offset_;
   std::unique_ptr<ShapeView> shape_view_;
   std::unique_ptr<MutShapeView> mut_shape_view_;
 };
 
-#define INIT_GLOBAL_BLOB_MUTABLE_CHECKER(is_header_mutable, is_body_mutable)             \
-  COMMAND(Global<BlobAccessCheckerIf<is_header_mutable, is_body_mutable>>::SetAllocated( \
+#define INIT_GLOBAL_BLOB_MUTABLE_CHECKER(is_header_mutable, is_body_mutable)                \
+  COMMAND(Singleton<BlobAccessCheckerIf<is_header_mutable, is_body_mutable>>::SetAllocated( \
       new BlobAccessCheckerIf<is_header_mutable, is_body_mutable>()))
 
 INIT_GLOBAL_BLOB_MUTABLE_CHECKER(false, false);

@@ -81,10 +81,10 @@ class CpuMinMaxObserverKernel final : public user_op::OpKernel {
     if (quantization_formula == "google") {
       // NOTE(Liang Depeng): per-layer quantization by default
       int64_t outer_num = 1;
-      int64_t inner_num = in->shape().elem_cnt();
+      int64_t inner_num = in->shape_view().elem_cnt();
       if (!per_layer_quantization) {  // per-channel quantization
-        outer_num = in->shape().At(0);
-        inner_num = in->shape().Count(1);
+        outer_num = in->shape_view().At(0);
+        inner_num = in->shape_view().Count(1);
       }
 
       if (quantization_scheme == "symmetric") {
@@ -106,7 +106,7 @@ class CpuMinMaxObserverKernel final : public user_op::OpKernel {
       if (!per_layer_quantization) {
         UNIMPLEMENTED() << " per-channel mode is not supported in cambricon scheme";
       }
-      GenQuantScaleCambricon(in_ptr, quantization_bit, in->shape().elem_cnt(), scale_ptr,
+      GenQuantScaleCambricon(in_ptr, quantization_bit, in->shape_view().elem_cnt(), scale_ptr,
                              zero_point_ptr);
     } else {
       UNIMPLEMENTED();
@@ -116,11 +116,11 @@ class CpuMinMaxObserverKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_MIN_MAX_OBSERVER_KERNEL(dtype)                      \
-  REGISTER_USER_KERNEL("min_max_observer")                           \
-      .SetCreateFn<CpuMinMaxObserverKernel<dtype>>()                 \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kCPU) \
-                       & (user_op::HobDataType("in", 0) == GetDataType<dtype>::value))
+#define REGISTER_MIN_MAX_OBSERVER_KERNEL(dtype)                       \
+  REGISTER_USER_KERNEL("min_max_observer")                            \
+      .SetCreateFn<CpuMinMaxObserverKernel<dtype>>()                  \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("in", 0) == GetDataType<dtype>::value))
 
 REGISTER_MIN_MAX_OBSERVER_KERNEL(float);
 REGISTER_MIN_MAX_OBSERVER_KERNEL(double);

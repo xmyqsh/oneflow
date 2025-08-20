@@ -29,7 +29,7 @@ LocalCtrlClient::LocalCtrlClient(const ProcessCtx& process_ctx) {
 }
 
 void LocalCtrlClient::Barrier(const std::string& barrier_name) {
-  Barrier(barrier_name, Global<EnvDesc>::Get()->TotalMachineNum());
+  Barrier(barrier_name, Singleton<EnvDesc>::Get()->TotalMachineNum());
 }
 
 void LocalCtrlClient::Barrier(const std::string& barrier_name, int32_t barrier_num) {
@@ -47,7 +47,7 @@ void LocalCtrlClient::Barrier(const std::string& barrier_name, int32_t barrier_n
     }
   }
   counter->Decrease();
-  counter->WaitUntilCntEqualZero();
+  counter->WaitForeverUntilCntEqualZero();
   if (is_first) {
     std::unique_lock<std::mutex> lck(barrier_counter_mtx_);
     CHECK_EQ(barrier_counter_.erase(barrier_name), 1);
@@ -75,7 +75,7 @@ void LocalCtrlClient::NotifyDone(const std::string& name) {
 
 void LocalCtrlClient::WaitUntilDone(const std::string& name) {
   std::unique_lock<std::mutex> lck(done_names_mtx_);
-  LOG(INFO) << "waiting for name: " << name;
+  VLOG(3) << "waiting for name: " << name;
   done_names_cv_.wait(lck);
   CHECK(done_names_.find(name) != done_names_.end());
 }
@@ -111,7 +111,7 @@ void LocalCtrlClient::PullKV(const std::string& k,
   while (true) {
     auto it = kv_.find(k);
     if (it == kv_.end()) {
-      LOG(INFO) << "waiting for key: " << k;
+      VLOG(3) << "waiting for key: " << k;
       kv_cv_.wait(lck);
     } else {
       VGetter(it->second);
@@ -174,11 +174,11 @@ class DryRunCtrlClient : public CtrlClient {
   ~DryRunCtrlClient() override = default;
 
   void Barrier(const std::string& barrier_name) override {
-    Barrier(barrier_name, Global<EnvDesc>::Get()->TotalMachineNum());
+    Barrier(barrier_name, Singleton<EnvDesc>::Get()->TotalMachineNum());
   }
   void Barrier(const std::string& barrier_name, int32_t barrier_num) override {
-    LOG(INFO) << "skipping barrier in dry run, barrier name: " << barrier_name
-              << ", barrier num: " << barrier_num;
+    VLOG(3) << "skipping barrier in dry run, barrier name: " << barrier_name
+            << ", barrier num: " << barrier_num;
   }
 
   TryLockResult TryLock(const std::string& name) override {
@@ -229,30 +229,30 @@ void SetLocalProcessCtx(oneflow::ProcessCtx* ctx) {
 }
 
 Maybe<void> LocalRpcManager::Bootstrap() {
-  SetLocalProcessCtx(Global<ProcessCtx>::Get());
+  SetLocalProcessCtx(Singleton<ProcessCtx>::Get());
   return Maybe<void>::Ok();
 }
 
 Maybe<void> LocalRpcManager::CreateClient() {
-  auto* client = new LocalCtrlClient(*Global<ProcessCtx>::Get());
-  Global<CtrlClient>::SetAllocated(client);
+  auto* client = new LocalCtrlClient(*Singleton<ProcessCtx>::Get());
+  Singleton<CtrlClient>::SetAllocated(client);
   return Maybe<void>::Ok();
 }
 
-LocalRpcManager::~LocalRpcManager() { Global<CtrlClient>::Delete(); }
+LocalRpcManager::~LocalRpcManager() { Singleton<CtrlClient>::Delete(); }
 
 Maybe<void> DryRunRpcManager::Bootstrap() {
-  SetLocalProcessCtx(Global<ProcessCtx>::Get());
+  SetLocalProcessCtx(Singleton<ProcessCtx>::Get());
   return Maybe<void>::Ok();
 }
 
 Maybe<void> DryRunRpcManager::CreateClient() {
-  auto* client = new DryRunCtrlClient(*Global<ProcessCtx>::Get());
-  Global<CtrlClient>::SetAllocated(client);
+  auto* client = new DryRunCtrlClient(*Singleton<ProcessCtx>::Get());
+  Singleton<CtrlClient>::SetAllocated(client);
   return Maybe<void>::Ok();
 }
 
-DryRunRpcManager::~DryRunRpcManager() { Global<CtrlClient>::Delete(); }
+DryRunRpcManager::~DryRunRpcManager() { Singleton<CtrlClient>::Delete(); }
 
 }  // namespace oneflow
 

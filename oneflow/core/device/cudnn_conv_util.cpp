@@ -134,7 +134,8 @@ template<typename perf_t>
 perf_t CudnnConvAlgoGetOrInfer(const CudnnConvParams& params,
                                const std::function<perf_t(const CudnnConvParams&)>& InferFn,
                                CudnnConvAlgoCache::Store<perf_t>* store, std::mutex* mutex) {
-  const size_t cache_size = Global<ResourceDesc, ForSession>::Get()->thread_local_cache_max_size();
+  const size_t cache_size =
+      Singleton<ResourceDesc, ForSession>::Get()->thread_local_cache_max_size();
   auto InferWithCache = [&](const CudnnConvParams& p) -> perf_t {
     CudnnConvParams params_without_ws = p;
     params_without_ws.max_ws_size = 0;
@@ -152,7 +153,7 @@ perf_t CudnnConvAlgoGetOrInfer(const CudnnConvParams& params,
       if (perf_it != key_it->second.cend()) { return perf_it->second; }
     }
     perf_t perf = InferFn(p);
-    (*store)[params_without_ws].push_back(std::make_pair(p.max_ws_size, perf));
+    (*store)[params_without_ws].emplace_back(std::make_pair(p.max_ws_size, perf));
     return perf;
   };
   return ThreadLocalCachedCall(cache_size, InferWithCache, params);
@@ -209,7 +210,17 @@ CudnnConvDesc::CudnnConvDesc(const DataType compute_type, const DataType data_ty
   }
   const int32_t groups = ctx.Attr<int32_t>("groups");
   if (groups != 1) { OF_CUDNN_CHECK(cudnnSetConvolutionGroupCount(val_, groups)); }
+  bool use_tensor_op_math;
   if (GetCudnnDataType(data_type) == CUDNN_DATA_HALF) {
+    use_tensor_op_math = true;
+#if CUDNN_VERSION >= 8100
+  } else if (GetCudnnDataType(data_type) == CUDNN_DATA_BFLOAT16) {
+    use_tensor_op_math = true;
+#endif
+  } else {
+    use_tensor_op_math = false;
+  }
+  if (use_tensor_op_math) {
     OF_CUDNN_CHECK(cudnnSetConvolutionMathType(val_, CUDNN_TENSOR_OP_MATH));
   }
 }
@@ -238,7 +249,17 @@ CudnnConvDesc::CudnnConvDesc(const DataType compute_type, const DataType data_ty
   }
   const int32_t groups = ctx.Attr<int32_t>("groups");
   if (groups != 1) { OF_CUDNN_CHECK(cudnnSetConvolutionGroupCount(val_, groups)); }
+  bool use_tensor_op_math;
   if (GetCudnnDataType(data_type) == CUDNN_DATA_HALF) {
+    use_tensor_op_math = true;
+#if CUDNN_VERSION >= 8100
+  } else if (GetCudnnDataType(data_type) == CUDNN_DATA_BFLOAT16) {
+    use_tensor_op_math = true;
+#endif
+  } else {
+    use_tensor_op_math = false;
+  }
+  if (use_tensor_op_math) {
     OF_CUDNN_CHECK(cudnnSetConvolutionMathType(val_, CUDNN_TENSOR_OP_MATH));
   }
 }
@@ -320,7 +341,10 @@ ManagedCudnnConvResource::ManagedCudnnConvResource(const CudnnConvArgs& args)
 }
 
 ManagedCudnnConvResource::~ManagedCudnnConvResource() {
-  if (handle_ != nullptr) { OF_CUDNN_CHECK(cudnnDestroy(handle_)); }
+  if (handle_ != nullptr) {
+    Singleton<CudnnHandlePool>::Get()->Put(handle_);
+    handle_ = nullptr;
+  }
   if (x_dptr_ != nullptr) { OF_CUDA_CHECK(cudaFree(x_dptr_)); }
   if (w_dptr_ != nullptr) { OF_CUDA_CHECK(cudaFree(w_dptr_)); }
   if (y_dptr_ != nullptr) { OF_CUDA_CHECK(cudaFree(y_dptr_)); }
@@ -328,7 +352,7 @@ ManagedCudnnConvResource::~ManagedCudnnConvResource() {
 }
 
 cudnnHandle_t ManagedCudnnConvResource::cudnn_handle() {
-  if (handle_ == nullptr) { OF_CUDNN_CHECK(cudnnCreate(&handle_)); }
+  if (handle_ == nullptr) { handle_ = Singleton<CudnnHandlePool>::Get()->Get(); }
   return handle_;
 }
 
@@ -371,7 +395,12 @@ bool operator==(const CudnnConvParams& a, const CudnnConvParams& b) {
 }
 
 DataType GetConvDescDataType(DataType data_type, bool pseudo_half) {
-  return (data_type == DataType::kFloat16 && pseudo_half) ? DataType::kFloat : data_type;
+  if (data_type == DataType::kFloat16 && pseudo_half) {
+    return DataType::kFloat;
+  } else if (data_type == DataType::kBFloat16) {
+    return DataType::kFloat;
+  }
+  return data_type;
 }
 
 cudnnStatus_t GetCudnnConvWorkspaceSize(const CudnnConvArgs& args, CudnnConvResource* res,
@@ -519,7 +548,7 @@ perf_t FindCudnnConvAlgorithmWithResource(CudnnConvArgs* args, CudnnConvResource
     }
     return GetBestAlgorithm<perf_t>(*args, res, perf_vec);
   };
-  return Global<CudnnConvAlgoCache>::Get()->Remember<perf_t>(args->params, Infer);
+  return Singleton<CudnnConvAlgoCache>::Get()->Remember<perf_t>(args->params, Infer);
 }
 
 template<typename perf_t, typename algo_t>

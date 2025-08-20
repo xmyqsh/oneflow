@@ -16,7 +16,7 @@ limitations under the License.
 #ifdef __linux__
 
 #include "oneflow/core/comm_network/epoll/socket_read_helper.h"
-#include "oneflow/core/actor/actor_message_bus.h"
+#include "oneflow/core/lazy/actor/actor_message_bus.h"
 #include "oneflow/core/comm_network/epoll/epoll_comm_network.h"
 #include "oneflow/core/transport/transport.h"
 
@@ -83,7 +83,7 @@ void SocketReadHelper::SetStatusWhenMsgHeadDone() {
 
 void SocketReadHelper::SetStatusWhenMsgBodyDone() {
   if (cur_msg_.msg_type == SocketMsgType::kRequestRead) {
-    Global<EpollCommNet>::Get()->ReadDone(cur_msg_.request_read_msg.read_id);
+    Singleton<EpollCommNet>::Get()->ReadDone(cur_msg_.request_read_msg.read_id);
   }
   SwitchToMsgHeadReadHandle();
 }
@@ -94,8 +94,8 @@ void SocketReadHelper::SetStatusWhenRequestWriteMsgHeadDone() {
   msg_to_send.request_read_msg.src_token = cur_msg_.request_write_msg.src_token;
   msg_to_send.request_read_msg.dst_token = cur_msg_.request_write_msg.dst_token;
   msg_to_send.request_read_msg.read_id = cur_msg_.request_write_msg.read_id;
-  Global<EpollCommNet>::Get()->SendSocketMsg(cur_msg_.request_write_msg.dst_machine_id,
-                                             msg_to_send);
+  Singleton<EpollCommNet>::Get()->SendSocketMsg(cur_msg_.request_write_msg.dst_machine_id,
+                                                msg_to_send);
   SwitchToMsgHeadReadHandle();
 }
 
@@ -107,12 +107,12 @@ void SocketReadHelper::SetStatusWhenRequestReadMsgHeadDone() {
 }
 
 void SocketReadHelper::SetStatusWhenActorMsgHeadDone() {
-  Global<ActorMsgBus>::Get()->SendMsgWithoutCommNet(cur_msg_.actor_msg);
+  Singleton<ActorMsgBus>::Get()->SendMsgWithoutCommNet(cur_msg_.actor_msg);
   SwitchToMsgHeadReadHandle();
 }
 
 void SocketReadHelper::SetStatusWhenTransportMsgHeadDone() {
-  Global<Transport>::Get()->EnqueueTransportMsg(cur_msg_.transport_msg);
+  Singleton<Transport>::Get()->EnqueueTransportMsg(cur_msg_.transport_msg);
   SwitchToMsgHeadReadHandle();
 }
 

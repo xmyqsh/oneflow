@@ -19,6 +19,12 @@ limitations under the License.
 #include <map>
 #include <vector>
 #include <functional>
+#include "oneflow/api/python/caster/maybe.h"
+#include "oneflow/api/python/caster/optional.h"
+#include "oneflow/api/python/caster/size.h"
+#include "oneflow/api/python/caster/tensor.h"
+#include "oneflow/api/python/caster/autograd_function_state.h"
+#include "oneflow/core/common/preprocessor.h"
 
 namespace oneflow {
 
@@ -37,16 +43,17 @@ class OneflowModuleRegistry {
 
 }  // namespace oneflow
 
-#define ONEFLOW_API_PYBIND11_MODULE(module_path, m)                                                \
-  static void OneflowApiPythonModule##__LINE__(pybind11::module&);                                 \
-  namespace {                                                                                      \
-  struct OfApiRegistryInit {                                                                       \
-    OfApiRegistryInit() {                                                                          \
-      ::oneflow::OneflowModuleRegistry().Register(module_path, &OneflowApiPythonModule##__LINE__); \
-    }                                                                                              \
-  };                                                                                               \
-  OfApiRegistryInit of_api_registry_init;                                                          \
-  }                                                                                                \
-  static void OneflowApiPythonModule##__LINE__(pybind11::module& m)
+#define ONEFLOW_API_PYBIND11_MODULE(module_path, m)                                              \
+  static void OF_PP_CAT(OneflowApiPythonModule, __LINE__)(pybind11::module&);                    \
+  namespace {                                                                                    \
+  struct OfApiRegistryInit {                                                                     \
+    OfApiRegistryInit() {                                                                        \
+      ::oneflow::OneflowModuleRegistry().Register(module_path,                                   \
+                                                  &OF_PP_CAT(OneflowApiPythonModule, __LINE__)); \
+    }                                                                                            \
+  };                                                                                             \
+  OfApiRegistryInit of_api_registry_init;                                                        \
+  }                                                                                              \
+  static void OF_PP_CAT(OneflowApiPythonModule, __LINE__)(pybind11::module & m)
 
 #endif  // ONEFLOW_API_PYTHON_UTIL_OF_API_REGISTRY_H_

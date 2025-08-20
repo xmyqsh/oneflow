@@ -29,7 +29,7 @@ namespace {
 Maybe<void> InferBlobDescs(const OperatorConf& op_conf,
                            const std::function<BlobDesc*(const std::string&)>& BlobDesc4BnInOp) {
   BlobDesc* out = BlobDesc4BnInOp("out");
-  out->mut_shape() = Shape({1});
+  out->set_shape(Shape({1}));
   const DataType data_type = op_conf.esac_conf().data_type();
   CHECK_OR_RETURN(IsIntegralDataType(data_type));
   out->set_data_type(data_type);
@@ -52,7 +52,7 @@ Maybe<void> EsacOp::InferOutBlobDescs(
 
 Maybe<void> EsacOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   return Maybe<void>::Ok();
 }
 

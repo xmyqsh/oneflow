@@ -14,13 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/framework/framework.h"
-#include "oneflow/core/kernel/new_kernel_util.h"
+#include "oneflow/core/ep/include/primitive/copy_nd.h"
 
 namespace oneflow {
 
 namespace {
 
-template<DeviceType device_type, typename T>
+template<typename Context>
+std::unique_ptr<ep::primitive::CopyNd> NewCopyNdPrimitive(Context* ctx) {
+  return ep::primitive::NewPrimitive<ep::primitive::CopyNdFactory>(ctx->device_type(), 2);
+}
+
 class SplitLikeKernel final : public user_op::OpKernel {
  public:
   SplitLikeKernel() = default;
@@ -46,14 +50,13 @@ class SplitLikeKernel final : public user_op::OpKernel {
         }
       }
       if (ctx->TensorDesc4ArgNameAndIndex("out", i)->is_dynamic()) {
-        auto* mut_shape_view = ctx->MutShapeView4ArgNameAndIndex("out", i);
-        CHECK_NOTNULL(mut_shape_view);
+        auto mut_shape_view = ctx->MutShapeView4ArgNameAndIndex("out", i);
         DimVector out_i_dim_vec;
         like_shape_view.ToDimVector(&out_i_dim_vec);
         FOR_RANGE(int64_t, j, like_num_axes, in_num_axes) {
-          out_i_dim_vec.push_back(in_shape_view.At(j));
+          out_i_dim_vec.emplace_back(in_shape_view.At(j));
         }
-        mut_shape_view->set_shape(Shape(out_i_dim_vec));
+        mut_shape_view.set_shape(Shape(out_i_dim_vec));
       }
     }
     CHECK_EQ(total_dim_size, in_shape_view.At(axis));
@@ -62,19 +65,27 @@ class SplitLikeKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in_tensor = ctx->Tensor4ArgNameAndIndex("in", 0);
     const auto axis = ctx->Attr<int64_t>("axis");
-    const int64_t in_cols = in_tensor->shape().Count(axis);
-    const int64_t rows = in_tensor->shape().elem_cnt() / in_cols;
+    const int64_t in_cols = in_tensor->shape_view().Count(axis);
+    const int64_t rows = in_tensor->shape_view().elem_cnt() / in_cols;
     CHECK_GT(rows, 0);
+
+    auto primitive = NewCopyNdPrimitive(ctx);
+    CHECK(primitive);
     int64_t in_col_offset = 0;
     for (const auto& out_arg_pair : ctx->outputs()) {
       user_op::Tensor* out_tensor =
           ctx->Tensor4ArgNameAndIndex(out_arg_pair.first, out_arg_pair.second);
-      const int64_t out_cols = out_tensor->shape().Count(axis);
-      CHECK_EQ(out_tensor->shape().elem_cnt(), rows * out_cols);
+      const int64_t out_cols = out_tensor->shape_view().Count(axis);
+      CHECK_EQ(out_tensor->shape_view().elem_cnt(), rows * out_cols);
       if (out_cols > 0) {
-        NewKernelUtil<device_type>::CopyColsRegion(ctx->device_ctx(), rows, out_cols,
-                                                   in_tensor->dptr<T>(), in_col_offset, in_cols,
-                                                   out_tensor->mut_dptr<T>(), 0, out_cols);
+        DimVector dst_shape = {rows, out_cols};
+        DimVector dst_pos_vec = {0, 0};
+        DimVector src_shape = {rows, in_cols};
+        DimVector src_pos_vec = {0, in_col_offset};
+        DimVector extent_vec = {rows, out_cols};
+        primitive->Launch(ctx->stream(), out_tensor->data_type(), 2, out_tensor->mut_dptr(),
+                          dst_shape.data(), dst_pos_vec.data(), in_tensor->dptr(), src_shape.data(),
+                          src_pos_vec.data(), extent_vec.data());
       }
       in_col_offset += out_cols;
     }
@@ -84,25 +95,16 @@ class SplitLikeKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
+auto CopyNdPrimitiveExists() {
+  return hob::make_custom("CopyNdPrimitiveExists", [](const user_op::KernelRegContext& ctx) {
+    return NewCopyNdPrimitive(&ctx).operator bool();
+  });
+}
+
 }  // namespace
 
-#define REGISTER_SPLIT_LIKE_KERNEL(device, dtype)          \
-  REGISTER_USER_KERNEL("split_like")                       \
-      .SetCreateFn<SplitLikeKernel<device, dtype>>()       \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == device) \
-                       & (user_op::HobDataType("out", 0) == GetDataType<dtype>::value));
-
-#define REGISTER_SPLIT_LIKE_KERNEL_WITH_DEVICE(device) \
-  REGISTER_SPLIT_LIKE_KERNEL(device, float)            \
-  REGISTER_SPLIT_LIKE_KERNEL(device, double)           \
-  REGISTER_SPLIT_LIKE_KERNEL(device, int8_t)           \
-  REGISTER_SPLIT_LIKE_KERNEL(device, int32_t)          \
-  REGISTER_SPLIT_LIKE_KERNEL(device, int64_t)
-
-REGISTER_SPLIT_LIKE_KERNEL_WITH_DEVICE(DeviceType::kCPU)
-#ifdef WITH_CUDA
-REGISTER_SPLIT_LIKE_KERNEL_WITH_DEVICE(DeviceType::kGPU)
-REGISTER_SPLIT_LIKE_KERNEL(DeviceType::kGPU, float16)
-#endif
+REGISTER_USER_KERNEL("split_like")
+    .SetCreateFn<SplitLikeKernel>()
+    .SetIsMatchedHob(CopyNdPrimitiveExists() == true);
 
 }  // namespace oneflow

@@ -38,8 +38,16 @@ namespace oneflow {
   OF_PP_SEQ_MAP(PREPEND_PREFIX_BINARY_FUNC, LOGICAL_BINARY_FUNC_NAME_SEQ)
 
 #define REDUCE_BINARY_FUNC_NAME_SEQ (Sum)(Max)(Min)(Prod)(Any)(All)
+#define ARITHMETIC_REDUCE_BINARY_FUNC_NAME_SEQ (Sum)(Max)(Min)(Prod)
+#define LOGICAL_REDUCE_BINARY_FUNC_NAME_SEQ (Any)(All)
 #define REDUCE_BINARY_FUNC_SEQ \
   OF_PP_SEQ_MAP(PREPEND_PREFIX_BINARY_FUNC, REDUCE_BINARY_FUNC_NAME_SEQ)
+#define REDUCE_COMPLEX_BINARY_FUNC_SEQ OF_PP_SEQ_MAP(PREPEND_PREFIX_BINARY_FUNC, (Sum))
+#define ARITHMETIC_REDUCE_BINARY_FUNC_SEQ \
+  OF_PP_SEQ_MAP(PREPEND_PREFIX_BINARY_FUNC, ARITHMETIC_REDUCE_BINARY_FUNC_NAME_SEQ)
+#define LOGICAL_REDUCE_BINARY_FUNC_SEQ \
+  OF_PP_SEQ_MAP(PREPEND_PREFIX_BINARY_FUNC, LOGICAL_REDUCE_BINARY_FUNC_NAME_SEQ)
+#define NANSUM_REDUCE_BINARY_FUNC_SEQ OF_PP_SEQ_MAP(PREPEND_PREFIX_BINARY_FUNC, (NanSum))
 
 #define NO_HALF_UTIL_FOUND         \
   printf("cuda arch must >= 530"); \
@@ -61,6 +69,20 @@ struct BinaryFuncTrait final {
   }
 
 template<typename T>
+struct BinaryFuncNanSum final {
+  static OF_DEVICE_FUNC T Invoke(const T x, const T y) {
+#if defined(__CUDACC__)
+    if (isnan(x)) return isnan(y) ? T{0} : y;
+    return isnan(y) ? x : x + y;
+#else
+    if (std::isnan(x)) return std::isnan(y) ? T{0} : y;
+    return std::isnan(y) ? x : x + y;
+#endif
+  }
+};
+SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncNanSum);
+
+template<typename T>
 struct BinaryFuncAdd final {
   static OF_DEVICE_FUNC T Invoke(const T x, const T y) { return x + y; }
 };
@@ -79,6 +101,10 @@ SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncSub);
 template<typename T>
 struct BinaryFuncMul final {
   static OF_DEVICE_FUNC T Invoke(const T x, const T y) { return x * y; }
+};
+template<>
+struct BinaryFuncMul<bool> final {
+  static OF_DEVICE_FUNC bool Invoke(const bool x, const bool y) { return x && y; }
 };
 template<typename T>
 struct BinaryFuncProd final {
@@ -106,6 +132,19 @@ struct BinaryFuncFloorMod final {
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncFloorMod);
 
+template<>
+struct BinaryFuncFloorMod<uint8_t> final {
+  static OF_DEVICE_FUNC uint8_t Invoke(const uint8_t x, const uint8_t y) {
+#if defined(__CUDACC__)
+    uint8_t trunc_mod = x % y;
+    return trunc_mod;
+#else
+    uint8_t trunc_mod = x % y;
+    return trunc_mod;
+#endif
+  }
+};
+
 template<typename T>
 struct BinaryFuncFMod final {
   static OF_DEVICE_FUNC T Invoke(const T x, const T y) {
@@ -124,12 +163,24 @@ template<typename T>
 struct BinaryFuncPow final {
   static OF_DEVICE_FUNC const T Invoke(const T x, const T y) {
 #if defined(__CUDACC__)
-    return pow(x, y);
+    return powf(x, y);
 #else
     return std::pow(x, y);
 #endif
   }
 };
+
+template<>
+struct BinaryFuncPow<bool> final {
+  static OF_DEVICE_FUNC bool Invoke(const bool x, const bool y) {
+#if defined(__CUDACC__)
+    return static_cast<bool>(powf(static_cast<float>(x), static_cast<float>(y)));
+#else
+    return static_cast<bool>(std::pow(static_cast<float>(x), static_cast<float>(y)));
+#endif
+  }
+};
+
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncPow);
 
 template<>
@@ -148,7 +199,7 @@ struct BinaryFuncPow<double> final {
 template<>
 struct BinaryFuncPow<float> final {
   static __device__ __forceinline__ float Invoke(const float x, const float y) {
-    return __powf(x, y);
+    return powf(x, y);
   }
 };
 
@@ -156,13 +207,24 @@ template<>
 struct BinaryFuncPow<half> final {
   static __device__ __forceinline__ half Invoke(const half x, const half y) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 530
-    return __float2half(__powf(__half2float(x), __half2float(y)));
+    return __float2half(powf(__half2float(x), __half2float(y)));
 #else
     NO_HALF_UTIL_FOUND;
 #endif
   }
 };
 #endif  // defined(__CUDACC__)
+
+template<typename T>
+struct BinaryFuncFloorDiv final {
+  static OF_DEVICE_FUNC T Invoke(const T x, const T y) {
+#if defined(__CUDACC__)
+    return floor(fdividef(x, y));
+#else
+    return std::floor(x / y);
+#endif
+  }
+};
 
 template<typename T>
 struct BinaryFuncMax final {
@@ -178,74 +240,96 @@ SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncMin);
 
 template<typename T>
 struct BinaryFuncEQ final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x == y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x == y; }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncEQ);
 
 template<typename T>
 struct BinaryFuncNE final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x != y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x != y; }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncNE);
 
 template<typename T>
 struct BinaryFuncGT final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x > y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x > y; }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncGT);
 
 template<typename T>
 struct BinaryFuncGE final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x >= y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x >= y; }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncGE);
 
 template<typename T>
 struct BinaryFuncLT final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x < y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x < y; }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncLT);
 
 template<typename T>
 struct BinaryFuncLE final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x <= y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x <= y; }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncLE);
 
 template<typename T>
 struct BinaryFuncAND final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x && y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x && y; }
 };
 template<typename T>
 struct BinaryFuncAll final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) {
-    return BinaryFuncAND<T>::Invoke(x, y);
-  }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return BinaryFuncAND<T>::Invoke(x, y); }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncAND);
 
 template<typename T>
 struct BinaryFuncOR final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return x || y; }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return x || y; }
 };
 template<typename T>
 struct BinaryFuncAny final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) {
-    return BinaryFuncOR<T>::Invoke(x, y);
-  }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return BinaryFuncOR<T>::Invoke(x, y); }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncOR);
 
 template<typename T>
 struct BinaryFuncXOR final {
-  static OF_DEVICE_FUNC int8_t Invoke(const T x, const T y) { return (!x) != (!y); }
+  static OF_DEVICE_FUNC bool Invoke(const T x, const T y) { return (!x) != (!y); }
 };
 SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncXOR);
+
+template<typename T>
+struct BinaryFuncBitwiseAnd final {
+  static OF_DEVICE_FUNC T Invoke(const T x, const T y) { return x & y; }
+};
+SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncBitwiseAnd);
+
+template<typename T>
+struct BinaryFuncBitwiseOr final {
+  static OF_DEVICE_FUNC T Invoke(const T x, const T y) { return x | y; }
+};
+SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncBitwiseOr);
+
+template<typename T>
+struct BinaryFuncBitwiseXor final {
+  static OF_DEVICE_FUNC T Invoke(const T x, const T y) { return x ^ y; }
+};
+SPECIALIZE_CONST_TYPE_BINARY_FUNC(BinaryFuncBitwiseXor);
 
 #if defined(__CUDACC__)
 template<>
 struct BinaryFuncAdd<half> final {
   static __device__ __forceinline__ half Invoke(const half x, const half y) { return __hadd(x, y); }
+};
+
+template<>
+struct BinaryFuncNanSum<half> final {
+  static __device__ __forceinline__ half Invoke(const half x, const half y) {
+    if (isnan(__half2float(x))) return isnan(__half2float(y)) ? half(0.0) : y;
+    return isnan(__half2float(y)) ? __hadd(x, y) : x;
+  }
 };
 
 template<>
@@ -300,6 +384,51 @@ struct BinaryFuncMin<half> final {
 #else
     NO_HALF_UTIL_FOUND;
 #endif
+  }
+};
+
+template<>
+struct BinaryFuncAdd<cuComplex> final {
+  static __device__ __forceinline__ cuComplex Invoke(const cuComplex x, const cuComplex y) {
+    return cuComplex{x.x + y.x, x.y + y.y};
+  }
+};
+
+template<>
+struct BinaryFuncSub<cuComplex> final {
+  static __device__ __forceinline__ cuComplex Invoke(const cuComplex x, const cuComplex y) {
+    return cuComplex{x.x - y.x, x.y - y.y};
+  }
+};
+
+template<>
+struct BinaryFuncMul<cuComplex> final {
+  static __device__ __forceinline__ cuComplex Invoke(const cuComplex x, const cuComplex y) {
+    return cuCmulf(x, y);
+  }
+};
+
+template<>
+struct BinaryFuncAdd<cuDoubleComplex> final {
+  static __device__ __forceinline__ cuDoubleComplex Invoke(const cuDoubleComplex x,
+                                                           const cuDoubleComplex y) {
+    return cuDoubleComplex{x.x + y.x, x.y + y.y};
+  }
+};
+
+template<>
+struct BinaryFuncSub<cuDoubleComplex> final {
+  static __device__ __forceinline__ cuDoubleComplex Invoke(const cuDoubleComplex x,
+                                                           const cuDoubleComplex y) {
+    return cuDoubleComplex{x.x - y.x, x.y - y.y};
+  }
+};
+
+template<>
+struct BinaryFuncMul<cuDoubleComplex> final {
+  static __device__ __forceinline__ cuDoubleComplex Invoke(const cuDoubleComplex x,
+                                                           const cuDoubleComplex y) {
+    return cuCmul(x, y);
   }
 };
 
@@ -423,6 +552,48 @@ struct BinaryFuncFMod<float16> final {
 };
 
 #endif  // defined(__CUDACC__)
+
+#if defined(__CUDACC__)
+
+template<>
+struct BinaryFuncFloorDiv<uint8_t> final {
+  static __device__ __forceinline__ uint8_t Invoke(uint8_t x, uint8_t y) { return x / y; }
+};
+
+template<>
+struct BinaryFuncFloorDiv<int8_t> final {
+  static __device__ __forceinline__ int8_t Invoke(int8_t x, int8_t y) { return x / y; }
+};
+
+template<>
+struct BinaryFuncFloorDiv<int32_t> final {
+  static __device__ __forceinline__ int32_t Invoke(int32_t x, int32_t y) { return x / y; }
+};
+
+template<>
+struct BinaryFuncFloorDiv<int64_t> final {
+  static __device__ __forceinline__ int64_t Invoke(int64_t x, int64_t y) { return x / y; }
+};
+
+template<>
+struct BinaryFuncFloorDiv<half> final {
+  static __device__ __forceinline__ half Invoke(const half x, const half y) {
+#if __CUDA_ARCH__ >= 530
+    return __float2half(floor(fdividef(__half2float(x), __half2float(y))));
+#else
+    NO_HALF_UTIL_FOUND;
+#endif
+  }
+};
+#else
+template<>
+struct BinaryFuncFloorDiv<float16> final {
+  static inline float16 Invoke(float16 x, float16 y) {
+    return static_cast<float16>(std::floor(static_cast<float>(x) / static_cast<float>(y)));
+  }
+};
+
+#endif  // defined(__CUDACC__)
 template<typename T, template<typename> class binary_func>
 struct UnitOfBinaryFunc;
 
@@ -432,6 +603,7 @@ struct UnitOfBinaryFunc;
     static OF_DEVICE_FUNC T Val() { return get_val<T>(); }   \
   };
 SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncAdd, GetZeroVal);
+SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncNanSum, GetZeroVal);
 SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncSum, GetZeroVal);
 SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncMul, GetOneVal);
 SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncProd, GetOneVal);
@@ -441,6 +613,18 @@ SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncAny, GetZeroVal);
 SPECIALIZE_UNIT_OF_BINARY_FUNC(BinaryFuncAll, GetOneVal);
 #undef SPECIALIZE_UNIT_OF_BINARY_FUNC
 
+/*
+These placeholder specializations are used for `GetBinaryBroadcastSbpSignature` in
+oneflow/user/ops/math_binary_broadcast_ops.cpp
+*/
+#define SPECIALIZE_FOR_SBP(binary_func) \
+  template<typename T>                  \
+  struct binary_func final {};
+
+SPECIALIZE_FOR_SBP(BinaryFuncIEN);
+SPECIALIZE_FOR_SBP(BinaryFuncINN);
+SPECIALIZE_FOR_SBP(BinaryFuncZeta);
+#undef SPECIALIZE_FOR_SBP
 }  // namespace oneflow
 
 #endif  // ONEFLOW_CORE_NDARRAY_BINARY_FUNC_H_

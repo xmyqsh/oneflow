@@ -17,6 +17,7 @@ limitations under the License.
 #define ONEFLOW_API_PYTHON_FUNCTIONAL_INDEXING_H_
 
 #include <Python.h>
+#undef _PyGC_FINALIZED
 
 #include "oneflow/api/python/functional/common.h"
 #include "oneflow/core/common/maybe.h"
@@ -29,11 +30,11 @@ namespace functional {
 
 namespace detail {
 
-Maybe<void> PySliceUnpack(PyObject* object, Py_ssize_t* start, Py_ssize_t* stop, Py_ssize_t* step);
+void PySliceUnpack(PyObject* object, Py_ssize_t* start, Py_ssize_t* stop, Py_ssize_t* step);
 
 Maybe<Tensor> ConvertToIndexingTensor(PyObject* object);
 
-Maybe<IndexItem> UnpackIndexItem(PyObject* object);
+IndexItem UnpackIndexItem(PyObject* object);
 
 }  // namespace detail
 

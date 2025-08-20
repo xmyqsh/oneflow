@@ -1,6 +1,8 @@
 /build
 /build-*
 /docs/build/
+/docs/build-cn/
+/docs/source/generated
 /cmake-build-*
 /dist
 /third_party/
@@ -24,7 +26,6 @@ wheelhouse*
 /oneflow/python/test/ops/localhost_script_*.sh
 .clangd
 compile_commands.json
-/oneflow/python/test/ops/localhost_script_*.sh
 .cache
 /oneflow-src.zip
 /oneflow_temp
@@ -39,3 +40,10 @@ unittest-log-*
 /data-test
 /tmp
 /python/oneflow/test/dataloader/data-test/
+
+/target
+saved_model
+/devcontainer-cache
+
+op_prof.csv
+*.lock

@@ -17,14 +17,14 @@ limitations under the License.
 #define ONEFLOW_USER_KERNELS_CLIP_BY_VALUE_KERNEL_H_
 
 #include "oneflow/core/common/data_type.h"
-#include "oneflow/core/device/device_context.h"
+#include "oneflow/core/ep/include/stream.h"
 
 namespace oneflow {
 
 template<typename T>
 OF_DEVICE_FUNC T DeviceMin(T a, T b) {
 #if defined(__CUDA_ARCH__)
-  return min(a, b);
+  return a < b ? a : b;
 #else
   return std::min(a, b);
 #endif
@@ -33,7 +33,7 @@ OF_DEVICE_FUNC T DeviceMin(T a, T b) {
 template<typename T>
 OF_DEVICE_FUNC T DeviceMax(T a, T b) {
 #if defined(__CUDA_ARCH__)
-  return max(a, b);
+  return a > b ? a : b;
 #else
   return std::max(a, b);
 #endif
@@ -92,9 +92,9 @@ struct ClipByMinMaxGradFunctor {
 template<DeviceType device_type, typename T>
 struct ClipKernelUtil {
   template<typename F>
-  static void Forward(DeviceCtx* ctx, F clip_func, const int64_t n, const T* x, T* y);
+  static void Forward(ep::Stream* stream, F clip_func, const int64_t n, const T* x, T* y);
   template<typename F>
-  static void Backward(DeviceCtx* ctx, F clip_func, const int64_t n, const T* x, const T* dy,
+  static void Backward(ep::Stream* stream, F clip_func, const int64_t n, const T* x, const T* dy,
                        T* dx);
 };
 

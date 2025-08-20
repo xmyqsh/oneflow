@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/graph/compute_task_node.h"
-#include "oneflow/core/graph/task_graph.h"
-#include "oneflow/core/operator/variable_op.h"
+#include "oneflow/core/graph/task_stream_index_manager.h"
 
 namespace oneflow {
 
@@ -27,6 +26,7 @@ class DistributeConcatCompTaskNode final : public CompTaskNode {
 
   void ProduceAllRegstsAndBindEdges() override;
   void ConsumeAllRegsts() override;
+  void ConsumeFakeRegsts() override;
 
   TaskType GetTaskType() const override { return TaskType::kDistributeConcat; }
 
@@ -50,10 +50,13 @@ void DistributeConcatCompTaskNode::ConsumeAllRegsts() {
   CHECK_EQ(cnt, 1);
 }
 
+void DistributeConcatCompTaskNode::ConsumeFakeRegsts() { ConsumeFakeRegst("in"); }
+
 void DistributeConcatCompTaskNode::BuildExecGphAndRegst() {
   BuildExecGphStructAndBindInRegst();
   BuildOutRegst();
-  mut_exec_gph().TopoForEachNode([this](ExecNode* node) { node->InferBlobDescs(parallel_ctx()); });
+  mut_exec_gph().TopoForEachNode(
+      [this](ExecNode* node) { (node->*GetInferBlobDescsMethod())(parallel_ctx()); });
 }
 
 void DistributeConcatCompTaskNode::BuildExecGphStructAndBindInRegst() {
@@ -83,6 +86,8 @@ void DistributeConcatCompTaskNode::BuildOutRegst() {
     out_regst->set_hint_inplace_consumed_regst_desc_id(in_regst->regst_desc_id());
   }
 }
+
+REGISTER_COMP_TASK_STREAM_INDEX_GETTER(TaskType::kDistributeConcat);
 
 REGISTER_SYSTEM_OP_COMP_TASK_NODE_TYPE(OperatorConf::kDistributeConcatConf,
                                        DistributeConcatCompTaskNode);

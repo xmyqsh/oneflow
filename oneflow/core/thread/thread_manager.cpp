@@ -16,14 +16,7 @@ limitations under the License.
 #include "oneflow/core/thread/thread_manager.h"
 #include "oneflow/core/job/resource_desc.h"
 #include "oneflow/core/job/global_for.h"
-#include "oneflow/core/thread/cpu_thread.h"
-#include "oneflow/core/thread/gpu_thread.h"
-#include "oneflow/core/common/balanced_splitter.h"
-#include "oneflow/core/common/blocking_counter.h"
 #include "oneflow/core/control/global_process_ctx.h"
-#include "oneflow/core/job/global_for.h"
-#include "oneflow/core/common/id_util.h"
-#include "oneflow/core/graph/id_serialization.h"
 
 namespace oneflow {
 
@@ -32,47 +25,48 @@ ThreadMgr::~ThreadMgr() {
     ActorMsg msg = ActorMsg::BuildCommandMsg(-1, ActorCmd::kStopThread);
     thread_pair.second->GetMsgChannelPtr()->Send(msg);
     thread_pair.second.reset();
-    LOG(INFO) << "actor thread " << thread_pair.first << " finish";
+    VLOG(1) << " Actor thread: " << thread_pair.first << " finished when process exits.";
   }
 }
 
 Thread* ThreadMgr::GetThrd(int64_t thrd_id) {
   auto iter = threads_.find(thrd_id);
-  CHECK(iter != threads_.end()) << "thread " << thrd_id << " not found";
+  CHECK(iter != threads_.end()) << " Thread: " << thrd_id << " not found";
   return iter->second.get();
 }
 
-void ThreadMgr::AddPlan(const Plan& plan) {
+void ThreadMgr::AddThreads(const HashSet<int64_t>& thread_ids) {
   const int64_t this_rank = GlobalProcessCtx::Rank();
-  for (const TaskProto& task : plan.task()) {
-    TaskId task_id = DeserializeTaskIdFromInt64(task.task_id());
-    StreamId stream_id = task_id.stream_id();
-    if (stream_id.device_id().rank() != this_rank) { continue; }
-    int64_t thrd_id = SerializeStreamIdToInt64(stream_id);
-    if (threads_.find(thrd_id) != threads_.end()) { continue; }
-    Thread* thread =
-        NewObj<int, Thread, const StreamId&>(stream_id.device_id().device_type(), stream_id);
+  for (int64_t thrd_id : thread_ids) {
+    const auto& it = threads_.find(thrd_id);
+    if (it != threads_.end()) {
+      // NOTE(chengcheng): check thread is not null.
+      CHECK(it->second) << " RuntimeError! Thread: " << thrd_id << " in manager must be NOT null.";
+      VLOG(1) << " Actor thread: " << thrd_id << " reused.";
+      continue;
+    }
+    StreamId stream_id = DecodeStreamIdFromInt64(thrd_id);
+    if (stream_id.rank() != this_rank) { continue; }
+    Thread* thread = new Thread(stream_id);
     CHECK_NOTNULL(thread);
     threads_[thrd_id].reset(thread);
+    VLOG(1) << " Actor thread: " << thrd_id << " created.";
   }
 }
 
-void SingleThreadLoop(size_t num, std::function<void(size_t i)> Callback) {
-  FOR_RANGE(size_t, i, 0, num) { Callback(i); }
-}
-
-void MultiThreadLoop(size_t num, std::function<void(size_t i)> Callback) {
-  size_t thread_num = Global<ThreadPool>::Get()->thread_num();
-  thread_num = std::min(num, thread_num);
-  BalancedSplitter bs(num, thread_num);
-  BlockingCounter bc(thread_num);
-  FOR_RANGE(size_t, range_id, 0, thread_num) {
-    Global<ThreadPool>::Get()->AddWork([&bc, &bs, range_id, Callback] {
-      FOR_RANGE(size_t, i, bs.At(range_id).begin(), bs.At(range_id).end()) { Callback(i); }
-      bc.Decrease();
-    });
+void ThreadMgr::DeleteThreads(const HashSet<int64_t>& thread_ids) {
+  std::unique_lock<std::mutex> lock(mutex4del_threads_);
+  for (int64_t thrd_id : thread_ids) {
+    const auto& it = threads_.find(thrd_id);
+    CHECK((it != threads_.end()) && (it->second))
+        << " RuntimeError! Actor thread: " << thrd_id << " non-existent but want to delete";
+    auto& thread = it->second;
+    ActorMsg msg = ActorMsg::BuildCommandMsg(-1, ActorCmd::kStopThread);
+    thread->GetMsgChannelPtr()->Send(msg);
+    thread.reset();
+    VLOG(1) << " Actor thread: " << thrd_id << " finished when the graph is destructed.";
+    threads_.erase(it);
   }
-  bc.WaitUntilCntEqualZero();
 }
 
 }  // namespace oneflow

@@ -34,7 +34,7 @@ Maybe<void> InferBlobDescs(const Operator& op,
   CHECK_OR_RETURN(IsIntegralDataType(data_type));
   for (const std::string& obn : op.output_bns()) {
     BlobDesc* out = BlobDesc4BnInOp(obn);
-    out->mut_shape() = Shape({1});
+    out->set_shape(Shape({1}));
     out->set_data_type(data_type);
   }
   return Maybe<void>::Ok();
@@ -55,7 +55,7 @@ Maybe<void> CaseOp::InferOutBlobDescs(
 
 Maybe<void> CaseOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   return Maybe<void>::Ok();
 }
 

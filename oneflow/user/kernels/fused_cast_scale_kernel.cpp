@@ -29,7 +29,7 @@ class FusedCastScaleCpuKernel final : public user_op::OpKernel {
     const user_op::Tensor* scale_by_tensor = ctx->Tensor4ArgNameAndIndex("scale_by_tensor", 0);
     user_op::Tensor* y = ctx->Tensor4ArgNameAndIndex("y", 0);
     const double scale_val = ctx->Attr<double>("scale");
-    const int64_t n = x->shape().elem_cnt();
+    const int64_t n = x->shape_view().elem_cnt();
     const T scale = *(scale_by_tensor->dptr<T>()) * scale_val;
     const U* x_ptr = x->dptr<U>();
     T* y_ptr = y->mut_dptr<T>();
@@ -38,12 +38,12 @@ class FusedCastScaleCpuKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_FUSED_CAST_SCALE_CPU_KERNEL(x_type, y_type)                          \
-  REGISTER_USER_KERNEL("fused_cast_scale")                                            \
-      .SetCreateFn<FusedCastScaleCpuKernel<y_type, x_type>>()                         \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")                             \
-                       & (user_op::HobDataType("y", 0) == GetDataType<y_type>::value) \
-                       & (user_op::HobDataType("x", 0) == GetDataType<x_type>::value));
+#define REGISTER_FUSED_CAST_SCALE_CPU_KERNEL(x_type, y_type)                           \
+  REGISTER_USER_KERNEL("fused_cast_scale")                                             \
+      .SetCreateFn<FusedCastScaleCpuKernel<y_type, x_type>>()                          \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)                  \
+                       && (user_op::HobDataType("y", 0) == GetDataType<y_type>::value) \
+                       && (user_op::HobDataType("x", 0) == GetDataType<x_type>::value));
 
 REGISTER_FUSED_CAST_SCALE_CPU_KERNEL(float, double);
 REGISTER_FUSED_CAST_SCALE_CPU_KERNEL(double, float);

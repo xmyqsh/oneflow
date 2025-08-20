@@ -17,28 +17,7 @@ import warnings
 from typing import Optional
 
 import oneflow as flow
-import oneflow._oneflow_internal
-from oneflow.framework.tensor import register_tensor_op
-from oneflow.nn.module import Module
-from oneflow.nn.modules.utils import _check_inplace_valid
-
-
-def _softmax_need_transpose(x, axis):
-    assert type(axis) is int
-    dim_num = len(x.shape)
-    if dim_num == 1:
-        return (False, None)
-    if axis < 0:
-        axis += dim_num
-    assert axis >= 0
-    assert axis < dim_num
-    need_transpose = False
-    permute = list(range(dim_num))
-    if axis != dim_num - 1:
-        need_transpose = True
-        permute[axis] = permute[-1]
-        permute[-1] = axis
-    return (need_transpose, permute)
+from oneflow.nn.modules.module import Module
 
 
 class PReLU(Module):
@@ -79,23 +58,27 @@ class PReLU(Module):
         >>> import oneflow as flow
         
         >>> m = flow.nn.PReLU()
-        >>> input = flow.Tensor(np.asarray([[[[1, -2], [3, 4]]]]), dtype=flow.float32)
+        >>> input = flow.tensor(np.asarray([[[[1, -2], [3, 4]]]]), dtype=flow.float32)
         >>> print(m(input).numpy())
         [[[[ 1.  -0.5]
            [ 3.   4. ]]]]
 
     """
 
-    def __init__(self, num_parameters: int = 1, init: float = 0.25) -> None:
+    def __init__(
+        self, num_parameters: int = 1, init: float = 0.25, device=None, dtype=None
+    ) -> None:
         super().__init__()
         self.num_parameters = num_parameters
-        self.weight = flow.nn.Parameter(flow.Tensor(num_parameters).fill_(init))
+        self.weight = flow.nn.Parameter(
+            flow.empty(num_parameters, dtype=dtype, device=device).fill_(init)
+        )
 
     def forward(self, x):
-        assert (
-            self.num_parameters == 1 or self.num_parameters == x.shape[1]
-        ), f"num_parameters in prelu must be 1 or {x.shape[1]}"
         return flow._C.prelu(x, self.weight)
+
+    def extra_repr(self) -> str:
+        return "num_parameters={}".format(self.num_parameters)
 
 
 class ReLU(Module):
@@ -130,8 +113,6 @@ class ReLU(Module):
         self.inplace = inplace
 
     def forward(self, x):
-        if self.inplace:
-            _check_inplace_valid(x)
         return flow._C.relu(x, self.inplace)
 
     def extra_repr(self):
@@ -189,6 +170,18 @@ class ReLU6(Module):
         return inplace_str
 
 
+def relu6(input, inplace=False):
+    r"""relu6(input, inplace=False) -> Tensor
+
+    Applies the element-wise function :math:`\text{ReLU6}(x) = \min(\max(0,x), 6)`.
+
+    See :class:`~oneflow.nn.ReLU6` for more details.
+    """
+    if inplace:
+        warnings.warn("nn.functional.relu6 do not support inplace now")
+    return flow._C.hardtanh(input, min_val=0.0, max_val=6.0)
+
+
 class Tanh(Module):
     """This operator computes the hyperbolic tangent value of Tensor.
 
@@ -227,49 +220,9 @@ class Tanh(Module):
         return flow._C.tanh(input)
 
 
-@register_tensor_op("tanh")
-def tanh_op(input):
-    """This operator computes the hyperbolic tangent value of Tensor.
-
-    The equation is:
-
-    .. math::
-
-        out = \\frac{e^x-e^{-x}}{e^x+e^{-x}}
-
-    Args:
-        x (oneflow.Tensor): A Tensor
-
-    Returns:
-        oneflow.Tensor: The result Tensor
-
-    For example:
-
-    .. code-block:: python
-
-        >>> import numpy as np
-        >>> import oneflow as flow
-        
-        >>> x = np.array([-1, 0, 1]).astype(np.float32)
-        >>> input = flow.Tensor(x)
-        >>> tanh = flow.nn.Tanh()
-        >>> out = tanh(input)
-        >>> out
-        tensor([-0.7616,  0.0000,  0.7616], dtype=oneflow.float32)
-
-    """
-    return Tanh()(input)
-
-
 class ELU(Module):
-    """Applies the element-wise function:
-
-    .. math::
-
-        \\text{ELU}(x) = \\begin{cases}
-				x & \\text{ if } x \\gt 0  \\\\
-                \\alpha*(exp(x)-1) & \\text{ if } x \\le 0 \\\\
-    		    \\end{cases}
+    """Applies the element-wise function 
+        :math:`\\text{ELU}(x) = \\begin{cases}x & \\text{ if } x \\gt 0  \\\\\\alpha*(exp(x)-1) & \\text{ if } x \\le 0 \\\\\\end{cases}`
 
     Args:
         alpha: the :math:`\\alpha` value for the ELU formulation. Default: 1.0
@@ -314,19 +267,80 @@ class ELU(Module):
         return param_str
 
 
-class GELU(Module):
-    """Gelu activation operator.
-
-    The equation is:
+class CELU(Module):
+    """Applies the element-wise function:
 
     .. math::
-        out = 0.5 * x * (1 + tanh(\\sqrt{\\frac{2}{\\pi}} * (x + 0.044715x^{3})))
+
+        \\text{CELU}(x, \\alpha) = \\begin{cases}
+				x & \\text{ if } x \\ge 0  \\\\
+                \\alpha*(exp(\\frac{x}{\\alpha})-1) & \\text{ otherwise } \\\\
+    		    \\end{cases}
 
     Args:
-        x (oneflow.Tensor): Input Tensor
+        alpha: the :math:`\\alpha` value for the CELU formulation. Default: 1.0
+        inplace: can optionally do the operation in-place. Default: ``False``
+
+    Shape:
+        - Input: :math:`(N, *)` where `*` means, any number of additional
+          dimensions
+        - Output: :math:`(N, *)`, same shape as the input
+
+    For example:
+
+    .. code-block:: python
+
+
+        >>> import numpy as np
+        >>> import oneflow as flow
+        
+        >>> x = np.array([-0.5, 0, 0.5]).astype(np.float32)
+        >>> input = flow.Tensor(x)
+        >>> celu = flow.nn.CELU(alpha=0.5)
+
+        >>> out = celu(input)
+        >>> out
+        tensor([-0.3161,  0.0000,  0.5000], dtype=oneflow.float32)
+
+    """
+
+    def __init__(self, alpha: float = 1.0, inplace: bool = False):
+        super().__init__()
+        self.alpha = alpha
+        self.inplace = inplace
+
+    def forward(self, x):
+        return flow._C.celu(x, alpha=self.alpha, inplace=self.inplace)
+
+    def extra_repr(self):
+        param_str = f"alpha={self.alpha}"
+        param_str += ", inplace=True" if self.inplace else ""
+        return param_str
+
+
+class GELU(Module):
+    """
+    GELU(approximate='none') -> Tensor
+
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.GELU.html.
+
+    Applies the Gaussian Error Linear Units function:
+
+    .. math:: \\text{GELU}(x) = x * \Phi(x)
+
+    where :math:`\Phi(x)` is the Cumulative Distribution Function for Gaussian Distribution.
+
+    When the approximate argument is 'tanh', Gelu is estimated with:
+
+    .. math:: \\text{GELU}(x) = 0.5 * x * (1 + \\text{Tanh}(\sqrt(2 / \pi) * (x + 0.044715 * x^3)))
+
+    Args:
+        input (oneflow.Tensor): Input Tensor
+        approximate (string, optional): the gelu approximation algorithm to use:
+            ``'none'`` | ``'tanh'``. Default: ``'none'``
 
     Returns:
-        oneflow.Tensor: A Tensor.
+        oneflow.Tensor: A Tensor has same shape as the input.
 
     For example:
 
@@ -342,6 +356,47 @@ class GELU(Module):
         >>> out = gelu(input)
         >>> out
         tensor([-0.1543,  0.0000,  0.3457], dtype=oneflow.float32)
+
+    """
+
+    def __init__(self, approximate: str = "none"):
+        super().__init__()
+        self.approximate = approximate
+
+    def forward(self, input):
+        if self.approximate == "none" or self.approximate == "tanh":
+            return flow._C.gelu_with_approximate(input, self.approximate)
+        else:
+            raise NotImplementedError
+
+
+class QuickGELU(Module):
+    """
+    QuickGELU() -> Tensor
+
+    Applies GELU approximation that is fast but somewhat inaccurate. See: https://github.com/hendrycks/GELUs
+
+    .. math::
+        \\text{QuickGELU}(x) = x * \\sigma(1.702x) = x * \\frac{1}{1 + \\exp(-1.702x)}
+
+    Args:
+        input (oneflow.Tensor): Input Tensor
+
+    Returns:
+        oneflow.Tensor: A Tensor has same shape as the input.
+
+    For example:
+
+    .. code-block:: python
+
+        >>> import oneflow as flow
+        
+        >>> input = flow.Tensor([-0.5, 0, 0.5])
+        >>> gelu = flow.nn.QuickGELU()
+
+        >>> out = gelu(input)
+        >>> out
+        tensor([-0.1496,  0.0000,  0.3504], dtype=oneflow.float32)
 
     """
 
@@ -349,24 +404,24 @@ class GELU(Module):
         super().__init__()
 
     def forward(self, x):
-        return flow._C.gelu(x)
+        return flow._C.quick_gelu(x)
 
 
-@register_tensor_op("gelu")
-def gelu_op(x):
-    """Gelu activation operator.
+class SquareReLU(Module):
+    """
+    SquareReLU() -> Tensor
 
-    The equation is:
+    Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
 
     .. math::
-        out = 0.5 * x * (1 + tanh(\\sqrt{\\frac{2}{\\pi}} * (x + 0.044715x^{3})))
+        :math:`\\text{SquareReLU}(x) = \\max(0, x) * \\max(0, x)`
 
     Args:
-        x (oneflow.Tensor): Input Tensor
+        input (oneflow.Tensor): Input Tensor
 
     Returns:
-        oneflow.Tensor: A Tensor.
-
+        oneflow.Tensor: A Tensor has same shape as the input.
+        
     For example:
 
     .. code-block:: python
@@ -376,14 +431,19 @@ def gelu_op(x):
         
         >>> x = np.array([-0.5, 0, 0.5]).astype(np.float32)
         >>> input = flow.Tensor(x)
-        >>> gelu = flow.nn.GELU()
+        >>> square_relu = flow.nn.SquareReLU()
 
-        >>> out = gelu(input)
+        >>> out = square_relu(input)
         >>> out
-        tensor([-0.1543,  0.0000,  0.3457], dtype=oneflow.float32)
+        tensor([0.0000, 0.0000, 0.2500], dtype=oneflow.float32)
 
     """
-    return GELU()(x)
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return flow._C.square_relu(x)
 
 
 class Sigmoid(Module):
@@ -416,34 +476,6 @@ class Sigmoid(Module):
 
     def forward(self, x):
         return flow._C.sigmoid(x)
-
-
-@register_tensor_op("sigmoid")
-def sigmoid_op(x):
-    """Applies the element-wise function:
-
-    .. math::
-        \\text{Sigmoid}(x) = \\sigma(x) = \\frac{1}{1 + \\exp(-x)}
-
-    Shape:
-        - Input: :math:`(N, *)` where `*` means, any number of additional
-          dimensions
-        - Output: :math:`(N, *)`, same shape as the input
-
-    For example:
-
-    .. code-block:: python
-
-        >>> import numpy as np
-        >>> import oneflow as flow
-        
-        >>> x = flow.Tensor(np.array([0.81733328, 0.43621480, 0.10351428]))
-        >>> out = flow.sigmoid(x)
-        >>> out
-        tensor([0.6937, 0.6074, 0.5259], dtype=oneflow.float32)
-
-    """
-    return Sigmoid()(x)
 
 
 class Hardsigmoid(Module):
@@ -488,34 +520,66 @@ class Hardsigmoid(Module):
 
     def forward(self, x):
         if self.inplace:
-            warnings.warn("Hardsigmoid module do not support inplace now")
-        return flow._C.hardsigmoid(x)
+            return flow._C.hardsigmoid(x, True)
+        return flow._C.hardsigmoid(x, False)
 
     def extra_repr(self):
         inplace_str = "inplace=True" if self.inplace else ""
         return inplace_str
 
 
-class Softmax(Module):
-    def __init__(self, dim: Optional[int] = None):
+class Hardshrink(Module):
+    r"""
+    The Hardshrink activation.
+
+    The formula is:
+
+    .. math::
+        \text{Hardshrink}(x) =
+        \begin{cases}
+        x, & \text{ if } x > \lambda \\
+        x, & \text{ if } x < -\lambda \\
+        0, & \text{ otherwise }
+        \end{cases}
+
+    Args:
+        lambd: the :math:`\lambda` value for the Hardshrink formulation. Default: 0.5
+        inplace: can optionally do the operation in-place. Default: ``False``
+
+    Shape:
+        - Input: :math:`(N, *)` where `*` means, any number of additional
+          dimensions
+        - Output: :math:`(N, *)`, same shape as the input
+
+    For example:
+
+    .. code-block:: python
+    
+        >>> import numpy as np
+        >>> import oneflow as flow
+        >>> x = np.array([-1.1, 0, 0.2, 0.5]).astype(np.float32)
+        >>> input = flow.Tensor(x)
+        >>> hardshrink = flow.nn.Hardshrink(lambd=0.5)
+        >>> out = hardshrink(input)
+        >>> out
+        tensor([-1.1000,  0.0000,  0.0000,  0.0000], dtype=oneflow.float32)
+    """
+
+    def __init__(self, lambd: float = 0.5, inplace: bool = False):
         super().__init__()
-        self.axis = 1 if dim is None else dim
+        self.inplace = inplace
+        self.lambd = lambd
 
     def forward(self, x):
-        (need_transpose, permute) = _softmax_need_transpose(x, self.axis)
-        if need_transpose:
-            x = flow._C.transpose(x, perm=permute)
-        res = flow._C.softmax(x)
-        if need_transpose:
-            res = flow._C.transpose(res, perm=permute)
-        return res
+        return flow._C.hardshrink(x, lambd=self.lambd, inplace=self.inplace)
 
-    def extra_repr(self):
-        return f"axis={self.axis}"
+    def extra_repr(self) -> str:
+        param_str = f"lambd={self.lambd}"
+        param_str += ", inplace=True" if self.inplace else ""
+        return param_str
 
 
-@register_tensor_op("softmax")
-def softmax_op(tensor, dim=None):
+class Softmax(Module):
     """Applies the Softmax function to an n-dimensional input Tensor
     rescaling them so that the elements of the n-dimensional output Tensor
     lie in the range [0,1] and sum to 1.
@@ -560,7 +624,16 @@ def softmax_op(tensor, dim=None):
         tensor([[[0.1575, 0.3754, 0.4671],
                  [0.0507, 0.1230, 0.8263]]], dtype=oneflow.float32)
     """
-    return Softmax(dim)(tensor)
+
+    def __init__(self, dim: Optional[int] = None):
+        super(Softmax, self).__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        return flow._C.softmax(x, self.dim)
+
+    def extra_repr(self):
+        return f"dim={self.dim}"
 
 
 class LogSoftmax(Module):
@@ -599,23 +672,12 @@ class LogSoftmax(Module):
                 [-0.4877, -3.3176, -1.0506]], dtype=oneflow.float32)
     """
 
-    def __init__(self, dim: Optional[int] = 1):
-        super().__init__()
+    def __init__(self, dim: Optional[int] = None):
+        super(LogSoftmax, self).__init__()
         self.dim = dim
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        if not hasattr(self, "dim"):
-            self.dim = None
-
     def forward(self, x):
-        (need_transpose, permute) = _softmax_need_transpose(x, self.dim)
-        if need_transpose:
-            x = flow._C.transpose(x, perm=permute)
-        x = flow._C.logsoftmax(x)
-        if need_transpose:
-            x = flow._C.transpose(x, perm=permute)
-        return x
+        return flow._C.log_softmax(x, self.dim)
 
     def extra_repr(self):
         return f"dim={self.dim}"
@@ -654,9 +716,7 @@ class LogSigmoid(Module):
         super().__init__()
 
     def forward(self, x):
-        sigmoid_res = flow.sigmoid(x)
-        res = flow.log(sigmoid_res)
-        return res
+        return flow._C.logsigmoid(x)
 
 
 class Softplus(Module):
@@ -702,19 +762,15 @@ class Softplus(Module):
         self.threshold = threshold
 
     def forward(self, x):
-        return flow.where(
-            x * self.beta > self.threshold,
-            x,
-            1 / self.beta * flow.log(1.0 + flow.exp(self.beta * x)),
-        )
+        return flow._C.softplus(x, beta=self.beta, threshold=self.threshold)
 
     def extra_repr(self):
         return f"beta={self.beta}, threshold={self.threshold}"
 
 
 class Hardswish(Module):
-    """Applies the hardswish function, element-wise, as described in the paper:
-    `Searching for MobileNetV3`_.
+    """Applies the hardswish function, element-wise, as described in the paper `Searching for MobileNetV3
+    <https://arxiv.org/abs/1905.02244>`__.
 
     .. math::
         \\text{Hardswish}(x) = \\begin{cases}
@@ -743,9 +799,7 @@ class Hardswish(Module):
         >>> out = hardswish(input)
         >>> out
         tensor([-0.2083,  0.0000,  0.2917], dtype=oneflow.float32)
-
-    .. _`Searching for MobileNetV3`:
-        https://arxiv.org/abs/1905.02244
+        
     """
 
     def __init__(self, inplace: bool = False):
@@ -881,12 +935,68 @@ class LeakyReLU(Module):
         self.inplace = inplace
 
     def forward(self, x):
-        if self.inplace:
-            warnings.warn("LeakyReLU module do not support inplace now")
-        return flow._C.leaky_relu(x, alpha=self.negative_slope)
+        return flow._C.leaky_relu(x, alpha=self.negative_slope, inplace=self.inplace)
 
     def extra_repr(self):
         param_str = f"negative_slope={self.negative_slope}"
+        param_str += ", inplace=True" if self.inplace else ""
+        return param_str
+
+
+class RReLU(Module):
+    """Applies the randomized leaky rectified liner unit function, element-wise:
+
+    .. math::
+        \\text{RReLU}(x) = \\begin{cases}
+            x, & \\text{ if } x \\geq 0 \\\\
+            a \\times x, & \\text{ otherwise }
+        \\end{cases}
+        
+    where :math:`a` is randomly sampled from uniform distribution
+    :math:`\mathcal{U}(\text{lower}, \text{upper})`.
+    
+    .. note::
+        See `Empirical Evaluation of Rectified Activations in Convolution Network: <https://arxiv.org/pdf/1505.00853.pdf>`_
+
+    Args:
+        lower: lower bound of the uniform distribution. Default: :math:`\frac{1}{8}`
+        upper: upper bound of the uniform distribution. Default: :math:`\frac{1}{3}`
+        inplace: can optionally do the operation in-place. Default: ``False``
+
+    Shape:
+        - Input: :math:`(*)`, where :math:`*` means any number of dimensions.
+        - Output: :math:`(N, *)`, same shape as the input
+
+    For example:
+
+    .. code-block:: python
+
+        >>> import oneflow as flow
+        >>> import numpy as np
+        
+        >>> m = flow.nn.RReLU(0.1, 0.3)
+        >>> arr = np.array([0.2, -0.3, -3.0, 4.0, 0.5, -2.2])
+        >>> x = flow.Tensor(arr)
+        >>> out = m(x) 
+        >>> print(out) # doctest: +SKIP
+        tensor([ 0.2000, -0.0824, -0.5418,  4.0000,  0.5000, -0.4213], dtype=oneflow.float32) # doctest: +SKIP
+            
+    """
+
+    def __init__(
+        self, lower: float = 1.0 / 8, upper: float = 1.0 / 3, inplace: bool = False
+    ):
+        super().__init__()
+        self.lower = lower
+        self.upper = upper
+        self.inplace = inplace
+
+    def forward(self, x):
+        return flow._C.rrelu(x, self.lower, self.upper, self.training, self.inplace)
+
+    def extra_repr(self):
+        param_str = f"lower={self.lower}"
+        param_str += f"upper={self.upper}"
         param_str += ", inplace=True" if self.inplace else ""
         return param_str
 
@@ -927,29 +1037,6 @@ class Mish(Module):
 
     def forward(self, x):
         return flow._C.mish(x)
-
-
-def mish_op(x):
-    """Applies the element-wise function:
-
-    .. math::
-        \\text{Mish}(x) = x * \\text{Tanh}(\\text{Softplus}(x))
-
-    .. note::
-        See `Mish: A Self Regularized Non-Monotonic Neural Activation Function <https://arxiv.org/abs/1908.08681>`_
-
-    See :mod:`oneflow.nn.Mish`
-    """
-    return Mish()(x)
-
-
-@register_tensor_op("mish")
-def mish_op_tensor(x):
-    """
-    mish() -> Tensor
-    See :func:`oneflow.mish`
-    """
-    return Mish()(x)
 
 
 class SiLU(Module):
@@ -994,36 +1081,6 @@ class SiLU(Module):
 
     def forward(self, x):
         return flow._C.silu(x)
-
-
-def silu_op(x):
-    r"""SiLU(Swish) activation:
-
-    .. math::
-        \text{SiLU}(x) = x * sigmoid(x)
-    
-    .. note::
-    
-        See `Gaussian Error Linear Units (GELUs) <https://arxiv.org/abs/1606.08415>`_
-        where the SiLU (Sigmoid Linear Unit) was originally coined, and see
-        `Sigmoid-Weighted Linear Units for Neural Network Function Approximation
-        in Reinforcement Learning <https://arxiv.org/abs/1702.03118>`_ and `Swish:
-        a Self-Gated Activation Function <https://arxiv.org/abs/1710.05941v1>`_
-        where the SiLU was experimented with later.
-    
-    See :mod:`oneflow.nn.SiLU`
-    """
-
-    return SiLU()(x)
-
-
-@register_tensor_op("silu")
-def silu_op_tensor(x):
-    r"""
-    silu() -> Tensor
-    See :func:`oneflow.silu`
-    """
-    return SiLU()(x)
 
 
 class SELU(Module):
@@ -1075,32 +1132,59 @@ class SELU(Module):
         return flow._C.selu(x)
 
 
-def selu_op(x):
-    r"""The SELU activation.
-
-    The formula is: 
-    
-    .. math::  
-    
-        \text{SELU}(x) = \text{scale} * (\max(0,x) + \min(0, \alpha * (\exp(x) - 1)))
-    
-    with :math:`\alpha = 1.6732632423543772848170429916717` and
-    
-    :math:`\text{scale} = 1.0507009873554804934193349852946`.
-
-    See :mod:`oneflow.nn.SELU`
-    """
-    return SELU()(x)
-
-
-@register_tensor_op("selu")
-def selu_op_tensor(x):
+class Softshrink(Module):
     r"""
-    selu() -> Tensor
+    The Softshrink activation.
+
+    The formula is:
     
-    See :func:`oneflow.selu`
+    .. math::
+
+        \text{Softshrink}(x) =
+        \begin{cases}
+        x - \lambd, & \text{ if } x > \lambda \\
+        x + \lambd, & \text{ if } x < -\lambda \\
+        0, & \text{ otherwise }
+        \end{cases}
+
+    The interface is consistent with PyTorch.
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.Softshrink.html.
+
+    Args:
+        lambd: the :math:`\lambda` value for the Softshrink formulation. Default: 0.5
+        inplace: can optionally do the operation in-place. Default: ``False``
+    
+    Shape:
+        - Input: :math:`(N, *)` where `*` means, any number of additional
+          dimensions
+        - Output: :math:`(N, *)`, same shape as the input
+
+    For example:
+    
+    .. code-block:: python
+    
+        >>> import numpy as np
+        >>> import oneflow as flow
+        >>> x = np.array([-1, 0, 0.2, 0.5]).astype(np.float32)
+        >>> input = flow.Tensor(x)
+        >>> softshrink = flow.nn.Softshrink(lambd=0.5)
+        >>> out = softshrink(input)
+        >>> out
+        tensor([-0.5000,  0.0000,  0.0000,  0.0000], dtype=oneflow.float32)
     """
-    return SELU()(x)
+
+    def __init__(self, lambd: float = 0.5, inplace: bool = False):
+        self.inplace = inplace
+        self.lambd = lambd
+        super().__init__()
+
+    def forward(self, x):
+        return flow._C.softshrink(x, alpha=self.lambd, inplace=self.inplace)
+
+    def extra_repr(self) -> str:
+        param_str = f"lambd={self.lambd}"
+        param_str += ", inplace=True" if self.inplace else ""
+        return param_str
 
 
 class Softsign(Module):
@@ -1139,27 +1223,99 @@ class Softsign(Module):
         return flow._C.softsign(x)
 
 
-def softsign_op(x):
-    r"""The SoftSign activation.
+class GLU(Module):
+    r"""The GLU activation.
+
+    Args:
+        input (Tensor, float): input tensor. 
+        dim (int, optional): dimension on which to split the input. Default: -1
+
+    Shape:
+        - Input: :math:`(\ast_1, N, \ast_2)` where `*` means, any number of additional
+          dimensions
+        - Output: :math:`(\ast_1, M, \ast_2)` where :math:`M=N/2`
 
     The formula is: 
     
     .. math::  
 
-        SoftSign(x) = \frac{x}{1 + |x|}
+        GLU(input) = GLU(a, b) = a \otimes sigmoid(b)
+
+    .. note::
+        where input is split in half along dim to form a and b, ⊗ is the element-wise product between matrices.
+
+    For example:
     
-    See :mod:`oneflow.nn.Softsign`
+    .. code-block:: python
+    
+        >>> import oneflow as flow
+        >>> import oneflow.nn as nn
+        >>> m = nn.GLU()
+        >>> x = flow.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=flow.float32)
+        >>> y = m(x)
+        >>> y
+        tensor([[0.9526, 1.9640],
+                [4.9954, 5.9980]], dtype=oneflow.float32)
+    
     """
-    return Softsign()(x)
+
+    def __init__(self, dim: Optional[int] = -1):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, input):
+        return flow._C.glu(input, self.dim)
 
 
-@register_tensor_op("softsign")
-def softsign_op_tensor(x):
-    r"""
-    softsign() -> Tensor
-    See :func:`oneflow.softsign`
+class Threshold(Module):
+    r"""The Threshold Activation. Return ``x`` if ``x`` is greater than ``threshold``, else return ``value``.
+
+    The interface is consistent with PyTorch.
+    The documentation is referenced from https://pytorch.org/docs/1.10/generated/torch.nn.Threshold.html.
+
+    The formula is:
+
+    .. math::
+
+        \text{Threshold}(x) =
+        \begin{cases}
+        x, & \text{ if } x > \text{ threshold } \\
+        \text{value }, & \text{ otherwise }
+        \end{cases}
+
+    Args:
+        threshold (float): The ``threshold`` value for the Threshold formulation
+        value (float): The ``value`` value for the Threshold formulation
+
+    Shapes:
+        - Input: :math:`(N, *)` where `*` means, any number of additional dimensions
+        - Output: :math:`(N, *)`, same shape as the input
+
+    Returns:
+        Oneflow.Tensor: The result tensor
+
+    For example:
+
+    .. code-block:: python
+
+        >>> import oneflow as flow
+        >>> import numpy as np
+        >>> x = np.array([-1, 0, 0.5, 1]).astype(np.float32)
+        >>> input = flow.Tensor(x)
+        >>> th = flow.nn.Threshold(threshold=0.5, value=0.2)
+        >>> out = th(input)
+        >>> out
+        tensor([0.2000, 0.2000, 0.2000, 1.0000], dtype=oneflow.float32)
+
     """
-    return Softsign()(x)
+
+    def __init__(self, threshold: float, value: float):
+        super().__init__()
+        self.threshold = threshold
+        self.value = value
+
+    def forward(self, input):
+        return flow._C.threshold(input, threshold=self.threshold, value=self.value)
 
 
 if __name__ == "__main__":

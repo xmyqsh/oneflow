@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/graph/compute_task_node.h"
+#include "oneflow/core/graph/task_stream_index_manager.h"
 
 namespace oneflow {
 
@@ -29,8 +30,8 @@ class DeviceTickCompTaskNode final : public CompTaskNode {
  private:
   void ProduceAllRegstsAndBindEdges() override;
   void ConsumeAllRegsts() override;
+  void ConsumeFakeRegsts() override;
   void BuildExecGphAndRegst() override;
-  bool IsIndependent() const override { return true; }
 };
 
 void DeviceTickCompTaskNode::ProduceAllRegstsAndBindEdges() {
@@ -42,6 +43,8 @@ void DeviceTickCompTaskNode::ConsumeAllRegsts() {
   ConsumeRegst("in");
   ForEachInDataEdge([&](TaskEdge* edge) { ConsumeRegst("in", edge->GetSoleRegst()); });
 }
+
+void DeviceTickCompTaskNode::ConsumeFakeRegsts() { ConsumeFakeRegst("in"); }
 
 void DeviceTickCompTaskNode::BuildExecGphAndRegst() {
   ExecNode* node = mut_exec_gph().NewNode();
@@ -56,15 +59,10 @@ void DeviceTickCompTaskNode::BuildExecGphAndRegst() {
     out_regst->AddLbi(lbi);
     node->BindBnWithRegst(obn, out_regst);
   }
-  node->InferBlobDescs(parallel_ctx());
+  (node->*GetInferBlobDescsMethod())(parallel_ctx());
 }
 
-REGISTER_TICK_TOCK_TASK_TYPE(TaskType::kDeviceTick);
-
-REGISTER_COMPUTE_TASK_NODE_STREAM_INDEX_GETTER(DeviceType::kCPU, TaskType::kDeviceTick)
-    .SetStreamIndexGetterFn([](CPUStreamIndexGenerator* generator) -> uint32_t {
-      return generator->GenerateTickTockStreamIndex();
-    });
+REGISTER_COMP_TASK_STREAM_INDEX_GETTER(TaskType::kDeviceTick);
 
 REGISTER_SYSTEM_OP_COMP_TASK_NODE_TYPE(OperatorConf::kDeviceTickConf, DeviceTickCompTaskNode);
 

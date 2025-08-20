@@ -19,13 +19,14 @@ limitations under the License.
 
 namespace oneflow {
 
-bool SubTskGphBuilderUtil::IsDeviceTypeCPUOrGPU(const ParallelDesc& parallel_desc) {
+bool SubTskGphBuilderUtil::IsDeviceTypeCPUOr(const ParallelDesc& parallel_desc,
+                                             DeviceType device_type) {
   return parallel_desc.device_type() == DeviceType::kCPU
-         || parallel_desc.device_type() == DeviceType::kGPU;
+         || parallel_desc.device_type() == device_type;
 }
 
 bool SubTskGphBuilderUtil::HasEmptySliceIfSplit(int64_t parallel_num,
-                                                const cfg::SbpParallel& sbp_parallel,
+                                                const SbpParallel& sbp_parallel,
                                                 const BlobDesc& blob_desc) {
   if (sbp_parallel.has_split_parallel()) {
     return blob_desc.shape().At(sbp_parallel.split_parallel().axis()) < parallel_num;
@@ -34,32 +35,32 @@ bool SubTskGphBuilderUtil::HasEmptySliceIfSplit(int64_t parallel_num,
   }
 }
 
-bool SubTskGphBuilderUtil::IsOnSameGPU(const TaskNode* lhs, const TaskNode* rhs) {
-  return lhs->machine_id() == rhs->machine_id() && lhs->device_type() == DeviceType::kGPU
-         && rhs->device_type() == DeviceType::kGPU && lhs->GpuPhyId() == rhs->GpuPhyId();
+bool SubTskGphBuilderUtil::IsOnSameDevice(const TaskNode* lhs, const TaskNode* rhs) {
+  return lhs->stream_id().device_id() == rhs->stream_id().device_id()
+         && lhs->stream_id().device_id().device_type() != DeviceType::kCPU;
 }
 
-bool SubTskGphBuilderUtil::IsBoxingS2S(const cfg::SbpParallel& src, const cfg::SbpParallel& dst) {
+bool SubTskGphBuilderUtil::IsBoxingS2S(const SbpParallel& src, const SbpParallel& dst) {
   return src.has_split_parallel() && dst.has_split_parallel();
 }
 
-bool SubTskGphBuilderUtil::IsBoxingS2B(const cfg::SbpParallel& src, const cfg::SbpParallel& dst) {
+bool SubTskGphBuilderUtil::IsBoxingS2B(const SbpParallel& src, const SbpParallel& dst) {
   return src.has_split_parallel() && dst.has_broadcast_parallel();
 }
 
-bool SubTskGphBuilderUtil::IsBoxingP2S(const cfg::SbpParallel& src, const cfg::SbpParallel& dst) {
+bool SubTskGphBuilderUtil::IsBoxingP2S(const SbpParallel& src, const SbpParallel& dst) {
   return src.has_partial_sum_parallel() && dst.has_split_parallel();
 }
 
-bool SubTskGphBuilderUtil::IsBoxingP2B(const cfg::SbpParallel& src, const cfg::SbpParallel& dst) {
+bool SubTskGphBuilderUtil::IsBoxingP2B(const SbpParallel& src, const SbpParallel& dst) {
   return src.has_partial_sum_parallel() && dst.has_broadcast_parallel();
 }
 
-bool SubTskGphBuilderUtil::IsBoxingB2B(const cfg::SbpParallel& src, const cfg::SbpParallel& dst) {
+bool SubTskGphBuilderUtil::IsBoxingB2B(const SbpParallel& src, const SbpParallel& dst) {
   return src.has_broadcast_parallel() && dst.has_broadcast_parallel();
 }
 
-bool SubTskGphBuilderUtil::IsBoxingB2S(const cfg::SbpParallel& src, const cfg::SbpParallel& dst) {
+bool SubTskGphBuilderUtil::IsBoxingB2S(const SbpParallel& src, const SbpParallel& dst) {
   return src.has_broadcast_parallel() && dst.has_split_parallel();
 }
 
@@ -67,7 +68,7 @@ bool SubTskGphBuilderUtil::BlobHasDynamicShape(const BlobDesc& blob_desc) {
   return blob_desc.is_dynamic();
 }
 
-bool SubTskGphBuilderUtil::IsErrorBoxingNotSupported(const cfg::ErrorProto& error) {
+bool SubTskGphBuilderUtil::IsErrorBoxingNotSupported(const ErrorProto& error) {
   return error.has_boxing_not_supported_error();
 }
 
@@ -104,19 +105,18 @@ int64_t SubTskGphBuilderUtil::GetDistance(const ParallelDesc& src_parallel_desc,
 }
 
 int64_t SubTskGphBuilderUtil::GetDistance(const TaskNode* src, const TaskNode* dst) {
-  const auto GetDevPhyId = [](const DeviceType device_type, const int64_t thrd_id) -> int64_t {
-    if (device_type == DeviceType::kGPU) {
-      return Global<IDMgr>::Get()->GetGpuPhyIdFromThrdId(thrd_id);
-    } else if (device_type == DeviceType::kCPU) {
+  const auto GetDevPhyId = [](const TaskNode* node) -> int64_t {
+    const DeviceId& device_id = node->stream_id().device_id();
+    if (device_id.device_type() == DeviceType::kCPU) {
       return 0;
     } else {
-      UNIMPLEMENTED();
+      return device_id.device_index();
     }
   };
   const DeviceType src_device_type = src->device_type();
-  const int64_t src_dev_phy_id = GetDevPhyId(src_device_type, src->thrd_id());
+  const int64_t src_dev_phy_id = GetDevPhyId(src);
   const DeviceType dst_device_type = dst->device_type();
-  const int64_t dst_dev_phy_id = GetDevPhyId(dst_device_type, dst->thrd_id());
+  const int64_t dst_dev_phy_id = GetDevPhyId(dst);
   return GetDistance(src->machine_id(), src_dev_phy_id, src_device_type, dst->machine_id(),
                      dst_dev_phy_id, dst_device_type);
 }

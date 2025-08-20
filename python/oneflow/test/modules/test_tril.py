@@ -14,17 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 import oneflow as flow
 import oneflow.unittest
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestTril(flow.unittest.TestCase):
-    @autotest()
+    @autotest(n=5, check_graph=True)
     def test_tril_without_diag(test_case):
         device = random_device()
-        x = random_pytorch_tensor(
+        x = random_tensor(
             ndim=4,
             dim0=random(1, 5).to(int),
             dim1=random(1, 5).to(int),
@@ -36,11 +37,11 @@ class TestTril(flow.unittest.TestCase):
 
         return y
 
-    @autotest()
+    @autotest(n=5, check_graph=True)
     def test_tril_with_diag(test_case):
         device = random_device()
         diagonal = random(-3, 3).to(int)
-        x = random_pytorch_tensor(
+        x = random_tensor(
             ndim=4,
             dim0=random(1, 5).to(int),
             dim1=random(1, 5).to(int),

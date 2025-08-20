@@ -18,17 +18,18 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_logical_or(test_case, shape, device):
     np_input = np.random.randint(3, size=shape)
     np_other = np.random.randint(3, size=shape)
-    input = flow.Tensor(np_input, dtype=flow.float32, device=flow.device(device))
-    other = flow.Tensor(np_other, dtype=flow.float32, device=flow.device(device))
+    input = flow.tensor(np_input, dtype=flow.float32, device=flow.device(device))
+    other = flow.tensor(np_other, dtype=flow.float32, device=flow.device(device))
     of_out = flow.logical_or(input, other)
     np_out = np.logical_or(np_input, np_other)
     test_case.assertTrue(np.array_equal(of_out.numpy(), np_out))
@@ -37,10 +38,18 @@ def _test_logical_or(test_case, shape, device):
 def _test_tensor_logical_or(test_case, shape, device):
     np_input = np.random.randint(3, size=shape)
     np_other = np.random.randint(3, size=shape)
-    input = flow.Tensor(np_input, dtype=flow.float32, device=flow.device(device))
-    other = flow.Tensor(np_other, dtype=flow.float32, device=flow.device(device))
+    input = flow.tensor(np_input, dtype=flow.float32, device=flow.device(device))
+    other = flow.tensor(np_other, dtype=flow.float32, device=flow.device(device))
     of_out = input.logical_or(other)
     np_out = np.logical_or(np_input, np_other)
+    test_case.assertTrue(np.array_equal(of_out.numpy(), np_out))
+
+
+def _test_tensor_scalar_logical_or(test_case, shape, scalar, dtype, device):
+    np_input = np.random.randint(3, size=shape)
+    input = flow.tensor(np_input, dtype=dtype, device=flow.device(device))
+    of_out = input.logical_or(scalar)
+    np_out = np.logical_or(np_input, scalar)
     test_case.assertTrue(np.array_equal(of_out.numpy(), np_out))
 
 
@@ -57,12 +66,35 @@ class TestLogicalOrModule(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest(n=10, auto_backward=False)
+    def test_scalar_logical_or(test_case):
+        arg_dict = OrderedDict()
+        arg_dict["test_fun"] = [_test_tensor_scalar_logical_or]
+        arg_dict["shape"] = [(2, 3), (2, 4, 5)]
+        arg_dict["scalar"] = [1, 0]
+        arg_dict["dtype"] = [flow.float32, flow.int32]
+        arg_dict["device"] = ["cpu", "cuda"]
+        for arg in GenArgList(arg_dict):
+            arg[0](test_case, *arg[1:])
+
+    @autotest(n=10, auto_backward=False, check_graph=True)
     def test_logical_or_with_random_data(test_case):
         device = random_device()
-        shape = random_tensor().value().shape
-        x1 = random_pytorch_tensor(len(shape), *shape, requires_grad=False).to(device)
-        x2 = random_pytorch_tensor(len(shape), *shape, requires_grad=False).to(device)
+        shape = random_tensor().oneflow.shape
+        x1 = random_tensor(len(shape), *shape, requires_grad=False).to(device)
+        x2 = random_tensor(len(shape), *shape, requires_grad=False).to(device)
+        y = torch.logical_or(x1, x2)
+        return y
+
+    @autotest(n=10, auto_backward=False, check_graph=True)
+    def test_logical_or_bool_with_random_data(test_case):
+        device = random_device()
+        shape = random_tensor().oneflow.shape
+        x1 = random_tensor(len(shape), *shape, requires_grad=False).to(
+            device=device, dtype=torch.bool
+        )
+        x2 = random_tensor(len(shape), *shape, requires_grad=False).to(
+            device=device, dtype=torch.bool
+        )
         y = torch.logical_or(x1, x2)
         return y
 

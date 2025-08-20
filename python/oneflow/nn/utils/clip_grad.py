@@ -22,7 +22,7 @@ import oneflow as flow
 
 from oneflow.framework.tensor import Tensor
 from oneflow.framework.tensor import register_tensor_op
-from oneflow.nn.module import Module
+from oneflow.nn.modules.module import Module
 
 
 _tensor_or_tensors = Union[Tensor, Iterable[Tensor]]
@@ -32,7 +32,8 @@ def clip_grad_norm_(
     parameters: _tensor_or_tensors,
     max_norm: float,
     norm_type: float = 2.0,
-    error_if_nonfinite: bool = True,
+    fused: bool = False,
+    error_if_nonfinite: bool = False,
 ) -> Tensor:
     r"""Clips gradient norm of an iterable of parameters.
     The norm is computed over all gradients together, as if they were
@@ -46,7 +47,7 @@ def clip_grad_norm_(
             infinity norm.
         error_if_nonfinite (bool): if True, an error is thrown if the total
             norm of the gradients from :attr:``parameters`` is ``nan``,
-            ``inf``, or ``-inf``. Default: True
+            ``inf``, or ``-inf``. Default: False (will switch to True in the future)
 
     Returns:
         Parameters after cliping gradient norm
@@ -90,46 +91,115 @@ def clip_grad_norm_(
     norm_type = float(norm_type)
     if len(parameters) == 0:
         return flow.tensor(0.0)
-    device = parameters[0].grad.device
-    if norm_type == float("inf"):
-        norms = [p.grad.detach().abs().max().to(device) for p in parameters]
-        total_norm = norms[0] if len(norms) == 1 else flow.max(flow.stack(norms))
-    elif norm_type == float("-inf"):
-        norms = [p.grad.detach().abs().min().to(device) for p in parameters]
-        total_norm = norms[0] if len(norms) == 1 else flow.min(flow.stack(norms))
-    else:
-        total_norm = flow.linalg.vector_norm(
-            flow.stack(
-                [
-                    flow.linalg.vector_norm(p.grad.detach(), norm_type).to(device)
-                    for p in parameters
-                ]
-            ),
-            norm_type,
-        )
-    if np.isnan(total_norm.numpy()) or np.isinf(total_norm.numpy()):
-        if error_if_nonfinite:
+
+    if parameters[0].is_global:
+        assert all(
+            [p.is_global for p in parameters]
+        ), "All parameters must be global tensor."
+        sbp_broadcast = [flow.sbp.broadcast for _ in parameters[0].sbp]
+        param0_placement = parameters[0].placement
+        if norm_type == float("inf"):
+            norms = [
+                p.grad.detach()
+                .to_global(sbp=sbp_broadcast)
+                .abs()
+                .max()
+                .to_global(placement=param0_placement)
+                for p in parameters
+            ]
+            total_norm = norms[0] if len(norms) == 1 else flow.max(flow.stack(norms))
+        elif norm_type == float("-inf"):
+            norms = [
+                p.grad.detach()
+                .to_global(sbp=sbp_broadcast)
+                .abs()
+                .min()
+                .to_global(placement=param0_placement)
+                for p in parameters
+            ]
+            total_norm = norms[0] if len(norms) == 1 else flow.min(flow.stack(norms))
+        else:
+            total_norm = flow.linalg.vector_norm(
+                flow.stack(
+                    [
+                        flow.linalg.vector_norm(
+                            p.grad.detach().to_global(sbp=sbp_broadcast), norm_type
+                        ).to_global(placement=param0_placement)
+                        for p in parameters
+                    ]
+                ),
+                norm_type,
+            )
+        if error_if_nonfinite and flow.logical_or(
+            total_norm.isnan(), total_norm.isinf()
+        ):
             raise RuntimeError(
                 f"The total norm of order {norm_type} for gradients from "
                 "`parameters` is non-finite, so it cannot be clipped. To disable "
                 "this error and scale the gradients by the non-finite norm anyway, "
                 "set `error_if_nonfinite=False`"
             )
-        else:
-            warnings.warn(
-                "Non-finite norm encountered in flow.nn.utils.clip_grad_norm_; continuing anyway. "
-                "Note that the default behavior will change in a future release to error out "
-                "if a non-finite total norm is encountered. At that point, setting "
-                "error_if_nonfinite=false will be required to retain the old behavior.",
-                FutureWarning,
-                stacklevel=2,
-            )
-    clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef.numpy().item() < 1:
+        clip_coef = max_norm / (total_norm + 1e-6)
+        clip_coef_clamped = clip_coef.clamp(max=1.0)
         for p in parameters:
-            # TODO: Switch to inplace multiply in future
-            p.grad[:] = p.grad.detach().mul(clip_coef.to(p.grad.device))
+            p.grad.detach().mul_(clip_coef_clamped.to_global(placement=p.placement))
+    elif fused and not error_if_nonfinite and all([p.grad.is_cuda for p in parameters]):
+        param_grad_list = []
+        for param in parameters:
+            param_grad_list.append(param.grad)
+        total_norm = flow._C.fused_clip_grad(param_grad_list, max_norm, norm_type,)
+    else:
+        device = parameters[0].grad.device
+        if norm_type == float("inf"):
+            norms = [p.grad.detach().abs().max().to(device) for p in parameters]
+            total_norm = norms[0] if len(norms) == 1 else flow.max(flow.stack(norms))
+        elif norm_type == float("-inf"):
+            norms = [p.grad.detach().abs().min().to(device) for p in parameters]
+            total_norm = norms[0] if len(norms) == 1 else flow.min(flow.stack(norms))
+        else:
+            total_norm = flow.linalg.vector_norm(
+                flow.stack(
+                    [
+                        flow.linalg.vector_norm(p.grad.detach(), norm_type).to(device)
+                        for p in parameters
+                    ]
+                ),
+                norm_type,
+            )
+        if error_if_nonfinite and flow.logical_or(
+            total_norm.isnan(), total_norm.isinf()
+        ):
+            raise RuntimeError(
+                f"The total norm of order {norm_type} for gradients from "
+                "`parameters` is non-finite, so it cannot be clipped. To disable "
+                "this error and scale the gradients by the non-finite norm anyway, "
+                "set `error_if_nonfinite=False`"
+            )
+        clip_coef = max_norm / (total_norm + 1e-6)
+        clip_coef_clamped = clip_coef.clamp(max=1.0)
+        for p in parameters:
+            p.grad.detach().mul_(clip_coef_clamped.to(p.grad.device))
     return total_norm
+
+
+def clip_grad_value_(parameters: _tensor_or_tensors, clip_value: float) -> None:
+    r"""Clips gradient of an iterable of parameters at specified value.
+
+    Gradients are modified in-place.
+
+    Args:
+        parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
+            single Tensor that will have gradients normalized
+        clip_value (float or int): maximum allowed value of the gradients.
+            The gradients are clipped in the range
+            :math:`\left[\text{-clip\_value}, \text{clip\_value}\right]`
+    """
+    if isinstance(parameters, flow.Tensor):
+        parameters = [parameters]
+    clip_value = float(clip_value)
+    for p in filter(lambda p: p.grad is not None, parameters):
+        # TODO: Switch to inplace clamp function
+        p.grad[:] = p.grad.clamp(min=-clip_value, max=clip_value)
 
 
 if __name__ == "__main__":

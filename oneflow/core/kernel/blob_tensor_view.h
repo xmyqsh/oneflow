@@ -29,9 +29,11 @@ class BlobTensorView final : public Tensor {
   explicit BlobTensorView(Blob* blob);
   ~BlobTensorView() = default;
 
-  const ShapeView& shape() const override;
-  MutShapeView* mut_shape() override;
+  ShapeView shape_view() const override;
+  MutShapeView mut_shape_view() override;
+  const Stride& stride() const override;
   DataType data_type() const override;
+  MemoryFormat memory_format() const override;
   const MemoryCase& mem_case() const override;
   const void* raw_dptr() const override;
   void* mut_raw_dptr() override;

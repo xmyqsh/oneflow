@@ -20,6 +20,17 @@ namespace oneflow {
 
 namespace {
 
+bool IsParallelCastOp(const OperatorConf& op_conf) {
+  return op_conf.has_user_conf()
+         && (op_conf.user_conf().op_type_name() == "parallel_cast"
+             || op_conf.user_conf().op_type_name() == "hierarchical_parallel_cast"
+             || op_conf.user_conf().op_type_name() == "hierarchical_parallel_cast_like");
+}
+
+bool NeedDoPass(const Job& job) {
+  return std::any_of(job.net().op().cbegin(), job.net().op().cend(), IsParallelCastOp);
+}
+
 class PruneParallelCastOpsPass final : public JobPass {
  public:
   PruneParallelCastOpsPass() = default;
@@ -30,6 +41,7 @@ class PruneParallelCastOpsPass final : public JobPass {
 
   Maybe<void> Apply(Job* job, JobPassCtx* ctx) const override {
     if (!IsEnabled(*ctx)) { return Maybe<void>::Ok(); }
+    if (!NeedDoPass(*job)) { return Maybe<void>::Ok(); }
     const OpGraph op_graph(*job);
     JobBuilder job_builder(job);
     return Apply(op_graph, &job_builder);
@@ -39,19 +51,13 @@ class PruneParallelCastOpsPass final : public JobPass {
 Maybe<void> PruneParallelCastOpsPass::Apply(const OpGraph& op_graph,
                                             JobBuilder* job_builder) const {
   HashMap<std::string, OperatorConf> op_name2op_conf;
-  HashMap<std::string, cfg::NdSbpSignature> op_name2nd_sbp_signature;
+  HashMap<std::string, NdSbpSignature> op_name2nd_sbp_signature;
   HashSet<std::string> ctrl_in_op_names;
   op_graph.ForEachNode([&](const OpNode* op_node) {
     for (const std::string& ctrl_in_op_name : op_node->op().op_conf().ctrl_in_op_name()) {
       ctrl_in_op_names.insert(ctrl_in_op_name);
     }
   });
-  const auto IsParallelCastOp = [](const OperatorConf& op_conf) -> bool {
-    return op_conf.has_user_conf()
-           && (op_conf.user_conf().op_type_name() == "parallel_cast"
-               || op_conf.user_conf().op_type_name() == "hierarchical_parallel_cast"
-               || op_conf.user_conf().op_type_name() == "hierarchical_parallel_cast_like");
-  };
   std::vector<std::string> del_op_names;
   op_graph.ForEachNode([&](const OpNode* op_node) {
     const OperatorConf& op_conf = op_node->op().op_conf();
@@ -63,8 +69,8 @@ Maybe<void> PruneParallelCastOpsPass::Apply(const OpGraph& op_graph,
     const LogicalBlobId& parallel_cast_in_lbi = GenLogicalBlobId(conf_wrapper.input("in", 0));
     const LogicalBlobId& parallel_cast_out_lbi = GenLogicalBlobId(conf_wrapper.output("out", 0));
     const OpNode* producer = op_graph.OpNode4OpName(parallel_cast_in_lbi.op_name());
-    const cfg::NdSbp& parallel_cast_nd_sbp = op_node->NdSbp4Lbi(parallel_cast_in_lbi);
-    const cfg::NdSbp& producer_nd_sbp = producer->NdSbp4Lbi(parallel_cast_in_lbi);
+    const NdSbp& parallel_cast_nd_sbp = op_node->NdSbp4Lbi(parallel_cast_in_lbi);
+    const NdSbp& producer_nd_sbp = producer->NdSbp4Lbi(parallel_cast_in_lbi);
     if (op_node->parallel_desc() != producer->parallel_desc()) { return; }
     if (parallel_cast_nd_sbp != producer_nd_sbp && op_node->out_edges().size() > 1) { return; }
     for (const OpEdge* out_edge : op_node->out_edges()) {
@@ -90,7 +96,7 @@ Maybe<void> PruneParallelCastOpsPass::Apply(const OpGraph& op_graph,
         }
       }
     }
-    del_op_names.push_back(op_conf.name());
+    del_op_names.emplace_back(op_conf.name());
   });
   for (const auto& pair : op_name2op_conf) { job_builder->MutOpsOnlyOnce({pair.second}); }
   for (const auto& pair : op_name2nd_sbp_signature) {

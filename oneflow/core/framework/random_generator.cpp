@@ -15,20 +15,25 @@ limitations under the License.
 */
 #include "oneflow/core/framework/random_generator.h"
 
-#include <mutex>
-#ifdef WITH_CUDA
+#include "oneflow/core/control/global_process_ctx.h"
 #include "oneflow/core/device/cuda_util.h"
-#endif  // WITH_CUDA
+#include "oneflow/core/ep/include/device_manager_registry.h"
+#include "oneflow/core/framework/auto_random_generator.h"
+#include "oneflow/core/framework/nd_sbp.h"
+#include "oneflow/user/kernels/random_seed_util.h"
+#include "oneflow/core/framework/instructions_builder.h"
+#include "oneflow/core/framework/tensor_util.h"
+#include "oneflow/core/framework/to_string.h"
+#include "oneflow/core/functional/functional.h"
+#include "oneflow/core/platform/include/pthread_fork.h"
+#include "oneflow/core/vm/virtual_machine.h"
+#include "oneflow/core/vm/vm_util.h"
+#include "oneflow/core/functional/impl/common.h"
 
 namespace oneflow {
 namespace one {
 
-Maybe<void> ManualSeed(uint64_t seed) {
-  JUST(DefaultAutoGenerator())->set_current_seed(seed);
-  return Maybe<void>::Ok();
-}
-
-namespace detail {
+namespace {
 
 uint64_t GetNonDeterministicRandom() {
   std::random_device rd;
@@ -37,104 +42,193 @@ uint64_t GetNonDeterministicRandom() {
   return s;
 }
 
-}  // namespace detail
+Maybe<void> CPUSynchronize() {
+  if (Singleton<VirtualMachine>::Get() != nullptr) { return vm::CurrentRankSync(); }
+  return Maybe<void>::Ok();
+}
 
-Generator::Generator(const std::shared_ptr<GeneratorImpl>& impl) : impl_(impl) {}
+}  // namespace
 
-uint64_t Generator::current_seed() const { return impl_->current_seed(); }
+Generator::Generator(const std::shared_ptr<ep::RandomGenerator>& internal) : internal_(internal) {}
 
-void Generator::set_current_seed(uint64_t seed) { impl_->set_current_seed(seed); }
+uint64_t Generator::current_seed() const { return internal_->current_seed(); }
+
+void Generator::add_children_generator(Symbol<ParallelDesc> placement, Symbol<NdSbp> nd_sbp,
+                                       const std::shared_ptr<Generator>& generator) {
+  children_generators_.emplace(std::make_pair(placement, nd_sbp), generator);
+}
+
+const HashMap<std::pair<Symbol<ParallelDesc>, Symbol<NdSbp>>, std::shared_ptr<one::Generator>>&
+Generator::children_generators() const {
+  return children_generators_;
+}
+
+void Generator::set_current_seed(uint64_t seed) {
+  CHECK_JUST(CPUSynchronize());
+  internal_->set_current_seed(seed);
+  for (auto pair : children_generators_) {
+    uint64_t rank_seed = seed;
+    if (pair.first.first->parallel_num() > 1) {
+      CHECK_JUST(one::functional::BroadcastSeedToAllRanks(&seed, /*root=*/0));  // NOLINT
+      rank_seed =
+          CHECK_JUST(GetRandomSeedForRank(*(pair.first.first), *(pair.first.second),  // NOLINT
+                                          seed,                                       // NOLINT
+                                          GlobalProcessCtx::Rank()));                 // NOLINT
+    }
+    pair.second->set_current_seed(rank_seed);
+  }
+}
 
 uint64_t Generator::seed() {
-  uint64_t seed = detail::GetNonDeterministicRandom();
+  uint64_t seed = GetNonDeterministicRandom();
   set_current_seed(seed);
   return seed;
 }
 
+Maybe<Symbol<Device>> Generator::device() const {
+  return Device::New(internal_->device_type_name(), internal_->device_index());
+}
+
+Maybe<Tensor> Generator::GetState() const {
+  JUST(CPUSynchronize());
+  int64_t state_size = internal_->GetStateSize();
+  std::vector<uint8_t> state_data(state_size);
+  internal_->GetState(state_size, state_data.data());
+  const auto& device = JUST(Device::New("cpu"));
+  const auto& state = JUST(functional::Empty(Shape{state_size}, DType::UInt8(), device,
+                                             /*requires_grad=*/false, /*pin_memory=*/false));
+  const auto& callback = [&](ep::Stream*,
+                             const std::shared_ptr<vm::EagerBlobObject>& eager_blob_object) {
+    memcpy(eager_blob_object->mut_dptr(), state_data.data(), state_size);
+  };
+  JUST(SyncAccessTensorWithTimeOut(state, callback, "mut"));
+  return state;
+}
+
+Maybe<void> Generator::SetState(const std::shared_ptr<Tensor>& state) {
+  const auto& device = JUST(state->device());
+  if (device->type() != "cpu") {
+    return Error::RuntimeError() << "Generator state should be host tensor.";
+  }
+  if (state->dtype() != DType::UInt8()) {
+    return Error::RuntimeError() << "Generator state should be dtype=flow.uint8";
+  }
+  size_t state_size = state->shape()->elem_cnt();
+  std::vector<uint8_t> state_data(state_size);
+  const auto& callback = [&](ep::Stream*,
+                             const std::shared_ptr<vm::EagerBlobObject>& eager_blob_object) {
+    memcpy(state_data.data(), eager_blob_object->dptr(), state_size);
+  };
+  JUST(SyncAccessTensorWithTimeOut(state, callback, "const"));
+  JUST(CPUSynchronize());
+  internal_->SetState(state_size, state_data.data());
+  return Maybe<void>::Ok();
+}
+
+Maybe<Generator> DefaultGenerator(const std::string& device, int device_index) {
+  static auto* default_auto_generator =
+      dynamic_cast<AutoGenerator*>(JUST(DefaultAutoGenerator())->internal().get());
+  if (device_index == -1) { device_index = (device == "cpu" ? 0 : GlobalProcessCtx::LocalRank()); }
+  return std::make_shared<Generator>(
+      JUST(default_auto_generator->GetOrCreate(device, device_index)));
+}
+
 Maybe<Generator> DefaultAutoGenerator() {
-  static auto default_auto_generator = std::make_shared<Generator>(
-      std::make_shared<AutoGeneratorImpl>(detail::GetNonDeterministicRandom()));
+  // Skip destructing to avoid calling symbols in other dynamic libraries when the global object is
+  // released.
+  static auto default_auto_generator = std::make_shared<Generator>(std::shared_ptr<AutoGenerator>(
+      new AutoGenerator(GetNonDeterministicRandom()), [](AutoGenerator*) {}));
   return default_auto_generator;
 }
 
 Maybe<Generator> DefaultCPUGenerator() {
-  static auto default_cpu_generator =
-      std::make_shared<Generator>(JUST(JUST(DefaultAutoGenerator())->Get<CPUGeneratorImpl>(0)));
+  static auto default_cpu_generator = JUST(DefaultGenerator("cpu", 0));
   return default_cpu_generator;
 }
 
-#ifdef WITH_CUDA
 Maybe<Generator> DefaultCUDAGenerator(int device_index) {
-  static std::vector<std::shared_ptr<Generator>> default_cuda_generator;
-  static std::once_flag init_flags;
+#ifdef WITH_CUDA
+  static int device_count = GetCudaDeviceCount();
+#else
   static int device_count = 0;
-  std::call_once(init_flags, [&]() {
-    device_count = detail::GetCudaDeviceCount();
-    default_cuda_generator.resize(device_count);
-    for (int i = 0; i < device_count; ++i) {
-      default_cuda_generator[i] = std::make_shared<Generator>(
-          CHECK_JUST(CHECK_JUST(DefaultAutoGenerator())->Get<CUDAGeneratorImpl>(i)));
-    }
-  });
-  if (device_index == -1) { OF_CUDA_CHECK(cudaGetDevice(&device_index)); }
+#endif  // WITH_CUDA
+  static std::vector<std::once_flag> init_flags(device_count);
+  static std::vector<std::shared_ptr<Generator>> default_cuda_generator(device_count);
+
+  if (device_index == -1) { device_index = GlobalProcessCtx::LocalRank(); }
   CHECK_OR_RETURN(device_index >= 0 && device_index < device_count)
       << "Invalid device index " << device_index;
+  std::call_once(init_flags[device_index], [&]() {
+    default_cuda_generator[device_index] = CHECK_JUST(DefaultGenerator("cuda", device_index));
+  });
   return default_cuda_generator.at(device_index);
 }
-#endif  // WITH_CUDA
 
 Maybe<Generator> MakeAutoGenerator() {
-  return std::make_shared<Generator>(std::make_shared<AutoGeneratorImpl>(default_rng_seed_val));
+  return std::make_shared<Generator>(std::make_shared<AutoGenerator>(default_rng_seed_val));
 }
 
 Maybe<Generator> MakeCPUGenerator() {
-  return std::make_shared<Generator>(std::make_shared<CPUGeneratorImpl>(default_rng_seed_val));
+  static auto device_mgr =
+      Singleton<ep::DeviceManagerRegistry>::Get()->GetDeviceManager(DeviceType::kCPU);
+  return std::make_shared<Generator>(device_mgr->CreateRandomGenerator(default_rng_seed_val, 0));
 }
 
-#ifdef WITH_CUDA
 Maybe<Generator> MakeCUDAGenerator(int device_index) {
-  if (device_index == -1) { OF_CUDA_CHECK(cudaGetDevice(&device_index)); }
-  CHECK_OR_RETURN(device_index >= 0 && device_index < detail::GetCudaDeviceCount())
-      << "Invalid device index " << device_index;
+  static auto device_mgr =
+      Singleton<ep::DeviceManagerRegistry>::Get()->GetDeviceManager(DeviceType::kCUDA);
+  if (device_index == -1) { device_index = GlobalProcessCtx::LocalRank(); }
   return std::make_shared<Generator>(
-      std::make_shared<CUDAGeneratorImpl>(default_rng_seed_val, device_index));
+      device_mgr->CreateRandomGenerator(default_rng_seed_val, device_index));
 }
+
+Maybe<void> ManualSeedAllCudaGenerator(uint64_t seed) {
+#ifdef WITH_CUDA
+  static int device_count = GetCudaDeviceCount();
+  FOR_RANGE(int, device_id, 0, device_count) {
+    const auto& cuda_gen = JUST(DefaultCUDAGenerator(device_id));
+    cuda_gen->set_current_seed(seed);
+  }
 #endif  // WITH_CUDA
+  return Maybe<void>::Ok();
+}
 
 Maybe<Generator> MakeGenerator(const std::string& device, int device_index) {
-  if (device == "cpu") {
-    return MakeCPUGenerator();
+  if (device == "auto") {
+    return std::make_shared<Generator>(std::make_shared<AutoGenerator>(default_rng_seed_val));
   }
-#ifdef WITH_CUDA
-  else if (device == "cuda") {
-    return MakeCUDAGenerator(device_index);
+  auto device_type = ep::DeviceManagerRegistry::GetDeviceTypeByDeviceTypeName(device);
+  if (device_type == DeviceType::kInvalidDevice) {
+    return Error::RuntimeError() << "Expected one of " << PrintGeneratorAvailableDevices()
+                                 << " device type at start of device string: " << device;
   }
-#endif  // WITH_CUDA
-  else if (device == "auto") {
-    return MakeAutoGenerator();
-  } else {
-    UNIMPLEMENTED_THEN_RETURN() << "Invalid device " << device
-                                << " for making generator, please make sure the device is one of "
-                                   "\"cpu\", \"cuda\" and \"auto\".";
-  }
+  auto device_mgr = Singleton<ep::DeviceManagerRegistry>::Get()->GetDeviceManager(device_type);
+  if (device_index == -1) { device_index = (device == "cpu" ? 0 : GlobalProcessCtx::LocalRank()); }
+  return std::make_shared<Generator>(
+      device_mgr->CreateRandomGenerator(default_rng_seed_val, device_index));
 }
 
-Maybe<Generator> DefaultGenerator(const std::string& device, int device_index) {
-  if (device == "cpu") {
-    return DefaultCPUGenerator();
-  }
-#ifdef WITH_CUDA
-  else if (device == "cuda") {
-    return DefaultCUDAGenerator(device_index);
-  }
-#endif  // WITH_CUDA
-  else if (device == "auto") {
-    return DefaultAutoGenerator();
-  } else {
-    UNIMPLEMENTED_THEN_RETURN() << "Invalid device " << device
-                                << " for making generator, please make sure the device is one of "
-                                   "\"cpu\", \"cuda\" and \"auto\".";
-  }
+Maybe<Generator> DefaultGenerator(DeviceType device, int device_index) {
+  return DefaultGenerator(*JUST(DeviceTag4DeviceType(device)), device_index);
+}
+
+Maybe<Generator> MakeGenerator(DeviceType device, int device_index) {
+  return MakeGenerator(*JUST(DeviceTag4DeviceType(device)), device_index);
+}
+
+Maybe<Generator> ManualSeed(uint64_t seed) {
+  const auto& default_auto_generator = JUST(DefaultAutoGenerator());
+  default_auto_generator->set_current_seed(seed);
+  return default_auto_generator;
+}
+
+Maybe<void> ManualSeed(uint64_t seed, const std::string& device, int device_index) {
+  JUST(DefaultGenerator(device, device_index))->set_current_seed(seed);
+  return Maybe<void>::Ok();
+}
+
+Maybe<void> ManualSeed(uint64_t seed, DeviceType device, int device_index) {
+  return ManualSeed(seed, *JUST(DeviceTag4DeviceType(device)), device_index);
 }
 
 }  // namespace one

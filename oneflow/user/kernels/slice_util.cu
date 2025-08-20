@@ -15,6 +15,10 @@ limitations under the License.
 */
 #include "oneflow/user/kernels/slice_util.h"
 #include "oneflow/core/common/switch_func.h"
+#include "oneflow/core/ep/cuda/cuda_stream.h"
+#if CUDA_VERSION >= 11000
+#include <cuda_bf16.h>
+#endif  // CUDA_VERSION >= 11000
 
 namespace oneflow {
 
@@ -32,6 +36,22 @@ __global__ void SliceForwardGpu(const int n, SliceParams params,
 }
 
 template<typename T, int NDIM>
+__global__ void SliceForwardGpu(const int n, SliceParams entire_params, SliceParams sliced_params,
+                                SliceIndexHelper<NDIM> entire_splitted_large_idx_cvtr,
+                                SliceIndexHelper<NDIM> sliced_splitted_large_idx_cvtr,
+                                SliceIndexHelper<NDIM> entire_full_small_idx_cvtr,
+                                SliceIndexHelper<NDIM> sliced_full_small_idx_cvtr, const T* entire,
+                                T* sliced) {
+  CUDA_1D_KERNEL_LOOP(i, n) {
+    int64_t entire_offset = SliceOffsetToEntireOffset<NDIM>(
+        i, entire_params, entire_splitted_large_idx_cvtr, sliced_splitted_large_idx_cvtr);
+    int64_t sliced_offset = SliceOffsetToEntireOffset<NDIM>(
+        i, sliced_params, entire_full_small_idx_cvtr, sliced_full_small_idx_cvtr);
+    sliced[sliced_offset] = entire[entire_offset];
+  }
+}
+
+template<typename T, int NDIM>
 __global__ void SliceBackwardGpu(const int n, SliceParams params,
                                  SliceIndexHelper<NDIM> entire_idx_cvtr,
                                  SliceIndexHelper<NDIM> sliced_idx_cvtr, T* entire,
@@ -43,26 +63,48 @@ __global__ void SliceBackwardGpu(const int n, SliceParams params,
 }
 
 template<typename T, int NDIM>
-void LaunchSliceForward(DeviceCtx* ctx, const SliceParams& params, const T* entire, T* sliced) {
+void LaunchSliceForward(ep::Stream* stream, const SliceParams& params, const T* entire, T* sliced) {
   CHECK_EQ(params.ndim, NDIM);
   int64_t elem_cnt = params.elem_cnt();
   SliceIndexHelper<NDIM> entire_idx_cvtr(params.dims);
   SliceIndexHelper<NDIM> sliced_idx_cvtr(params.size);
   if (elem_cnt == 0) { return; }
-  SliceForwardGpu<T, NDIM>
-      <<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0, ctx->cuda_stream()>>>(
-          elem_cnt, params, entire_idx_cvtr, sliced_idx_cvtr, entire, sliced);
+  SliceForwardGpu<T, NDIM><<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0,
+                             stream->As<ep::CudaStream>()->cuda_stream()>>>(
+      elem_cnt, params, entire_idx_cvtr, sliced_idx_cvtr, entire, sliced);
 }
 
 template<typename T, int NDIM>
-void LaunchSliceBackward(DeviceCtx* ctx, const SliceParams& params, const T* sliced, T* entire) {
+void LaunchSliceForward(ep::Stream* stream, const SliceParams& entire_params,
+                        const SliceParams& sliced_params, const T* entire, T* sliced) {
+  CHECK_EQ(entire_params.ndim, NDIM);
+  CHECK_EQ(sliced_params.ndim, NDIM);
+  int64_t elem_cnt = entire_params.elem_cnt();
+  if (elem_cnt == 0) { return; }
+  SliceIndexHelper<NDIM> entire_splitted_large_idx_cvtr =
+      NdIndexStrideOffsetHelper<int64_t, NDIM>(entire_params.stride);
+  SliceIndexHelper<NDIM> sliced_splitted_large_idx_cvtr(entire_params.size);
+  SliceIndexHelper<NDIM> entire_full_small_idx_cvtr =
+      NdIndexStrideOffsetHelper<int64_t, NDIM>(sliced_params.stride);
+  SliceIndexHelper<NDIM> sliced_full_small_idx_cvtr(sliced_params.size);
+  SliceForwardGpu<T, NDIM><<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0,
+                             stream->As<ep::CudaStream>()->cuda_stream()>>>(
+      elem_cnt, entire_params, sliced_params, entire_splitted_large_idx_cvtr,
+      sliced_splitted_large_idx_cvtr, entire_full_small_idx_cvtr, sliced_full_small_idx_cvtr,
+      entire, sliced);
+}
+
+template<typename T, int NDIM>
+void LaunchSliceBackward(ep::Stream* stream, const SliceParams& params, const T* sliced,
+                         T* entire) {
   CHECK_EQ(params.ndim, NDIM);
   int64_t elem_cnt = params.elem_cnt();
   SliceIndexHelper<NDIM> entire_idx_cvtr(params.dims);
   SliceIndexHelper<NDIM> sliced_idx_cvtr(params.size);
-  SliceBackwardGpu<T, NDIM>
-      <<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0, ctx->cuda_stream()>>>(
-          elem_cnt, params, entire_idx_cvtr, sliced_idx_cvtr, entire, sliced);
+  if (elem_cnt == 0) { return; }
+  SliceBackwardGpu<T, NDIM><<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0,
+                              stream->As<ep::CudaStream>()->cuda_stream()>>>(
+      elem_cnt, params, entire_idx_cvtr, sliced_idx_cvtr, entire, sliced);
 }
 
 template<typename T>
@@ -120,61 +162,67 @@ void GetPackedParams(const SliceParams& params, const T* entire, const T* sliced
 }  // namespace
 
 template<typename T>
-struct SliceKernelUtil<DeviceType::kGPU, T> {
-  static void Forward(DeviceCtx* ctx, const SliceParams& params, const T* entire, T* sliced) {
+struct SliceKernelUtil<DeviceType::kCUDA, T> {
+  static void Forward(ep::Stream* stream, const SliceParams& params, const T* entire, T* sliced) {
     SliceParams fold_slice_params = FoldContiguousFullSliceDimensions(params);
     size_t pack_size;
     SliceParams packed_params{};
     GetPackedParams<T>(fold_slice_params, entire, sliced, &pack_size, &packed_params);
     if (pack_size == 1) {
       SliceSwitchUtil<uint8_t>::SwitchLaunchSliceForward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint8_t*>(entire), reinterpret_cast<uint8_t*>(sliced));
     } else if (pack_size == 2) {
       SliceSwitchUtil<uint16_t>::SwitchLaunchSliceForward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint16_t*>(entire), reinterpret_cast<uint16_t*>(sliced));
     } else if (pack_size == 4) {
       SliceSwitchUtil<uint32_t>::SwitchLaunchSliceForward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint32_t*>(entire), reinterpret_cast<uint32_t*>(sliced));
     } else if (pack_size == 8) {
       SliceSwitchUtil<uint64_t>::SwitchLaunchSliceForward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint64_t*>(entire), reinterpret_cast<uint64_t*>(sliced));
     } else if (pack_size == 16) {
       SliceSwitchUtil<ulonglong2>::SwitchLaunchSliceForward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const ulonglong2*>(entire), reinterpret_cast<ulonglong2*>(sliced));
     } else {
       UNIMPLEMENTED();
     }
   }
 
-  static void Backward(DeviceCtx* ctx, const SliceParams& params, const T* sliced, T* entire) {
+  static void Forward(ep::Stream* stream, const SliceParams& entire_params,
+                      const SliceParams& sliced_params, const T* entire, T* sliced) {
+    SliceSwitchUtil<T>::SwitchLaunchSliceForward(SwitchCase(entire_params.ndim), stream,
+                                                 entire_params, sliced_params, entire, sliced);
+  }
+
+  static void Backward(ep::Stream* stream, const SliceParams& params, const T* sliced, T* entire) {
     SliceParams fold_slice_params = FoldContiguousFullSliceDimensions(params);
     size_t pack_size;
     SliceParams packed_params{};
     GetPackedParams<T>(fold_slice_params, entire, sliced, &pack_size, &packed_params);
     if (pack_size == 1) {
       SliceSwitchUtil<uint8_t>::SwitchLaunchSliceBackward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint8_t*>(sliced), reinterpret_cast<uint8_t*>(entire));
     } else if (pack_size == 2) {
       SliceSwitchUtil<uint16_t>::SwitchLaunchSliceBackward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint16_t*>(sliced), reinterpret_cast<uint16_t*>(entire));
     } else if (pack_size == 4) {
       SliceSwitchUtil<uint32_t>::SwitchLaunchSliceBackward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint32_t*>(sliced), reinterpret_cast<uint32_t*>(entire));
     } else if (pack_size == 8) {
       SliceSwitchUtil<uint64_t>::SwitchLaunchSliceBackward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const uint64_t*>(sliced), reinterpret_cast<uint64_t*>(entire));
     } else if (pack_size == 16) {
       SliceSwitchUtil<ulonglong2>::SwitchLaunchSliceBackward(
-          SwitchCase(packed_params.ndim), ctx, packed_params,
+          SwitchCase(packed_params.ndim), stream, packed_params,
           reinterpret_cast<const ulonglong2*>(sliced), reinterpret_cast<ulonglong2*>(entire));
     } else {
       UNIMPLEMENTED();
@@ -182,7 +230,11 @@ struct SliceKernelUtil<DeviceType::kGPU, T> {
   }
 };
 
-INSTANTIATE_SLICE_KERNEL_UTIL_WITH_DEVICE(DeviceType::kGPU)
-INSTANTIATE_SLICE_KERNEL_UTIL(DeviceType::kGPU, float16)
+INSTANTIATE_SLICE_KERNEL_UTIL_WITH_DEVICE(DeviceType::kCUDA)
+INSTANTIATE_SLICE_KERNEL_UTIL(DeviceType::kCUDA, cuComplex)
+INSTANTIATE_SLICE_KERNEL_UTIL(DeviceType::kCUDA, cuDoubleComplex)
+#if CUDA_VERSION >= 11000
+INSTANTIATE_SLICE_KERNEL_UTIL(DeviceType::kCUDA, nv_bfloat16)
+#endif
 
 }  // namespace oneflow

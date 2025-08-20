@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/graph/exec_graph.h"
+#include <sstream>
+#include "oneflow/core/common/just.h"
 #include "oneflow/core/graph/op_graph.h"
 
 namespace oneflow {
@@ -71,7 +73,7 @@ void ExecNode::ToProto(const ParallelContext* parallel_ctx, ExecNodeProto* ret) 
 
 namespace {
 
-Maybe<void> CheckPhysicalBlobDesc(const BlobDesc& logical, const cfg::NdSbp& nd_sbp,
+Maybe<void> CheckPhysicalBlobDesc(const BlobDesc& logical, const NdSbp& nd_sbp,
                                   const ParallelDesc& parallel_desc,
                                   const ParallelContext* parallel_ctx, const BlobDesc& physical) {
   CHECK_EQ_OR_RETURN(physical.shape(), *JUST(GetPhysicalShape(logical.shape(), nd_sbp,
@@ -82,7 +84,7 @@ Maybe<void> CheckPhysicalBlobDesc(const BlobDesc& logical, const cfg::NdSbp& nd_
 Maybe<void> CheckPhysicalBlobDesc(
     const Operator& op, const PbRpf<std::string>& bns,
     const std::function<Maybe<const BlobDesc>(const std::string&)>& GetLogicalBlobDesc,
-    const cfg::NdSbpSignature* nd_sbp_signature, const ParallelContext* parallel_ctx,
+    const NdSbpSignature* nd_sbp_signature, const ParallelContext* parallel_ctx,
     const std::function<BlobDesc*(const std::string&)>& GetPhysicalBlobDesc) {
   const std::shared_ptr<const ParallelDesc> op_parallel_desc = JUST(op.GetOpParallelDesc());
   for (const auto& bn : bns) {
@@ -92,20 +94,43 @@ Maybe<void> CheckPhysicalBlobDesc(
       continue;
     }
     if (*JUST(op.GetParallelDesc4BnInOp(bn)) == *op_parallel_desc) {
-      JUST(CheckPhysicalBlobDesc(*JUST(GetLogicalBlobDesc(bn)),
-                                 nd_sbp_signature->bn_in_op2nd_sbp().at(bn), *op_parallel_desc,
-                                 parallel_ctx, *physical_blob_desc));
+      JUST_MSG(CheckPhysicalBlobDesc(*JUST(GetLogicalBlobDesc(bn)),
+                                     nd_sbp_signature->bn_in_op2nd_sbp().at(bn), *op_parallel_desc,
+                                     parallel_ctx, *physical_blob_desc),
+               std::stringstream() << " check physical shape failed, op name " << op.op_loc());
     }
+  }
+  return Maybe<void>::Ok();
+}
+
+// A helper function to infer blob's physical shape with ND SBP.
+Maybe<void> InferPhysicalBlobDesc(
+    const Operator& op, const PbRpf<std::string>& bns,
+    const std::function<Maybe<const BlobDesc>(const std::string&)>& GetLogicalBlobDesc,
+    const NdSbpSignature* nd_sbp_signature, const ParallelContext* parallel_ctx,
+    const std::function<BlobDesc*(const std::string&)>& GetPhysicalBlobDesc) {
+  const std::shared_ptr<const ParallelDesc> op_parallel_desc = JUST(op.GetOpParallelDesc());
+  for (const auto& bn : bns) {
+    BlobDesc* physical_blob_desc = GetPhysicalBlobDesc(bn);
+    const auto& logical_blob_desc = *JUST(GetLogicalBlobDesc(bn));
+    CHECK_NOTNULL_OR_RETURN(physical_blob_desc)
+        << "physical_blob_desc should not be nullptr. op location: " << op.op_loc();
+    *physical_blob_desc = logical_blob_desc;
+    const auto& physical_shape = JUST_MSG(
+        GetPhysicalShape(logical_blob_desc.shape(), nd_sbp_signature->bn_in_op2nd_sbp().at(bn),
+                         *op_parallel_desc, *parallel_ctx),
+        std::stringstream() << " check physical shape failed, op name " << op.op_loc());
+    physical_blob_desc->set_shape(*physical_shape);
   }
   return Maybe<void>::Ok();
 }
 
 }  // namespace
 
-void ExecNode::InferBlobDescs(const ParallelContext* parallel_ctx) {
+void ExecNode::InferBlobDescsByInputs(const ParallelContext* parallel_ctx) {
   auto GetBlobDesc4BnInOp = GetBlobDesc4BnInOpFunc();
-  const OpNode* op_node = Global<OpGraph>::Get()->OpNode4OpName(op()->op_name());
-  const cfg::NdSbpSignature* nd_sbp_signature = nullptr;
+  const OpNode* op_node = Singleton<OpGraph>::Get()->OpNode4OpName(op()->op_name());
+  const NdSbpSignature* nd_sbp_signature = nullptr;
   if (op_node != nullptr) { nd_sbp_signature = &op_node->nd_sbp_signature(); }
 
   if (op_node != nullptr && parallel_ctx->parallel_num() > 1 && nd_sbp_signature != nullptr) {
@@ -114,15 +139,61 @@ void ExecNode::InferBlobDescs(const ParallelContext* parallel_ctx) {
         std::bind(&Operator::GetLogicalBlobDesc4Ibn, op().get(), std::placeholders::_1),
         nd_sbp_signature, parallel_ctx, GetBlobDesc4BnInOp));
   }
-  CHECK_JUST(op_->InferBlobDescsIf(GetBlobDesc4BnInOp, parallel_ctx, &GlobalJobDesc()));
+  CHECK_JUST_MSG(op_->InferBlobDescsIf(GetBlobDesc4BnInOp, parallel_ctx, &GlobalJobDesc()),
+                 std::stringstream() << " infer blob descs is failed, op name " << op_->op_loc());
   if (op_node != nullptr && parallel_ctx->parallel_num() > 1 && nd_sbp_signature != nullptr) {
     CHECK_JUST(CheckPhysicalBlobDesc(
         *op(), op()->output_bns(),
         std::bind(&Operator::GetLogicalBlobDesc4Obn, op().get(), std::placeholders::_1),
         nd_sbp_signature, parallel_ctx, GetBlobDesc4BnInOp));
   }
-  CHECK_JUST(op_->InferInplaceObn2IbnIf(&mut_inplace_obn2ibn_, &con_inplace_obn2ibn_,
-                                        GetBlobDesc4BnInOp, parallel_ctx));
+  CHECK_JUST_MSG(op_->InferInplaceObn2IbnIf(&mut_inplace_obn2ibn_, &con_inplace_obn2ibn_,
+                                            GetBlobDesc4BnInOp, parallel_ctx),
+                 std::stringstream()
+                     << " infer inplace obn to ibn is failed, op name " << op_->op_loc());
+}
+
+void ExecNode::InferBlobDescsByNdSbp(const ParallelContext* parallel_ctx) {
+  const HashSet<std::string> ibns{op()->input_bns().begin(), op()->input_bns().end()};
+  HashMap<std::string, BlobDesc> ibn2blob_desc{};
+  const auto& GetBlobDesc4BnInOp = [&](const std::string& bn_in_op) -> BlobDesc* {
+    // Generate temp regst to store input blob desc, and will be released after infer output blob
+    // desc.
+    if (ibns.count(bn_in_op) > 0) {
+      auto iter = ibn2blob_desc.find(bn_in_op);
+      if (iter == ibn2blob_desc.end()) {
+        iter = ibn2blob_desc.emplace(bn_in_op, BlobDesc(kInvalidDataType, kContiguous)).first;
+      }
+      return &iter->second;
+    }
+    auto it = bn_in_op2regst_.find(bn_in_op);
+    if (it == bn_in_op2regst_.end()) { return nullptr; }
+    std::shared_ptr<RegstDesc> regst = it->second;
+    CHECK(regst);
+    return regst->MutBlobDesc(op()->BnInOp2Lbi(bn_in_op));
+  };
+  const OpNode* op_node = Singleton<OpGraph>::Get()->OpNode4OpName(op()->op_name());
+  const NdSbpSignature* nd_sbp_signature = &CHECK_NOTNULL(op_node)->nd_sbp_signature();
+
+  // TODO(strint): user op can infer output with SBP, so there is no need to infer the input.
+  // Reference: https://github.com/Oneflow-Inc/oneflow/pull/8971
+  // Infer input blob desc with SBP, the infer results are set into the temp input blob desc.
+  CHECK_JUST(InferPhysicalBlobDesc(
+      *op(), op()->input_bns(),
+      std::bind(&Operator::GetLogicalBlobDesc4Ibn, op().get(), std::placeholders::_1),
+      nd_sbp_signature, parallel_ctx, GetBlobDesc4BnInOp));
+
+  // Infer output blob desc with input.
+  CHECK_JUST_MSG(op_->InferBlobDescsIf(GetBlobDesc4BnInOp, parallel_ctx, &GlobalJobDesc()),
+                 std::stringstream() << " infer blob descs is failed, op name " << op_->op_loc());
+  CHECK_JUST(CheckPhysicalBlobDesc(
+      *op(), op()->output_bns(),
+      std::bind(&Operator::GetLogicalBlobDesc4Obn, op().get(), std::placeholders::_1),
+      nd_sbp_signature, parallel_ctx, GetBlobDesc4BnInOp));
+  CHECK_JUST_MSG(op_->InferInplaceObn2IbnIf(&mut_inplace_obn2ibn_, &con_inplace_obn2ibn_,
+                                            GetBlobDesc4BnInOp, parallel_ctx),
+                 std::stringstream()
+                     << " infer inplace obn to ibn is failed, op name " << op_->op_loc());
 }
 
 std::function<BlobDesc*(const std::string&)> ExecNode::GetBlobDesc4BnInOpFunc() const {

@@ -22,59 +22,38 @@ limitations under the License.
 #include "oneflow/core/job_rewriter/job_completer.h"
 #include "oneflow/core/thread/thread_pool.h"
 #include "oneflow/core/common/blocking_counter.h"
+#include "oneflow/core/common/cost_util.h"
+#include "oneflow/core/job/lazy_mode.h"
 
 namespace oneflow {
 
-void CreateOpAttributeRef(Plan* plan, int64_t job_id, TaskProto* task_proto) {
-  auto* job_id2op_attribute_ref_table = plan->mutable_job_id2op_attribute_ref_table();
-  CHECK(task_proto->exec_sequence().exec_node_size() == 1);
-  auto* exec_node = task_proto->mutable_exec_sequence()->mutable_exec_node(0);
-  CHECK(exec_node->kernel_conf().has_op_attribute());
-  const std::string op_name = exec_node->kernel_conf().op_attribute().op_conf().name();
-  auto* op_name2op_attribute =
-      (*job_id2op_attribute_ref_table)[job_id].mutable_op_name2op_attribute();
-  auto find_it = op_name2op_attribute->find(op_name);
-  if (find_it == op_name2op_attribute->end()) {
-    op_name2op_attribute->insert(
-        {op_name, task_proto->exec_sequence().exec_node(0).kernel_conf().op_attribute()});
-  }
-  auto* kernel_conf =
-      task_proto->mutable_exec_sequence()->mutable_exec_node(0)->mutable_kernel_conf();
-  kernel_conf->set_op_attribute_ref(op_name);
-  // NOTE(levi): memory of op_attribute_ is released here.
-  kernel_conf->set_allocated_op_attribute(nullptr);
-}
-
-void Compiler::Compile(Job* job, Plan* plan, bool need_job_complete) const {
-  // Step1: ensure job is completed.
-  if (need_job_complete) { CHECK_JUST(JobCompleter().Complete(job)); }
-
-  // Step2: new Global<OpGraph> and set log configs.
-  Global<OpGraph>::New(*job);
+void Compiler::Compile(Job* job, Plan* plan) const {
+  const auto& job_name = job->job_conf().job_name();
+  auto compile_tc = std::make_unique<CostCounter<std::chrono::seconds>>(true, true);
+  // Step1: new Singleton<OpGraph> and set log configs.
+  Singleton<OpGraph>::New(*job);
   const JobDesc& job_desc = GlobalJobDesc();
-  if (Global<ResourceDesc, ForSession>::Get()->enable_debug_mode()
-      || Global<ResourceDesc, ForSession>::Get()->enable_dry_run()) {
-    TeePersistentLogStream::Create(StrCat("optimized_job", job_desc.job_id()))->Write(*job);
-    Global<OpGraph>::Get()->ToDotWithFilePath("optimized_dlnet_" + std::to_string(job_desc.job_id())
-                                              + "_op_graph.dot");
-  }
+  compile_tc->Count("[GraphCompile]" + job_name + " NewOpGraph", 1);
 
-  // Step3: build task_gph.
+  // Step2: build task_gph.
   // TODO(levi): we can rewrite this part of code in visitor pattern.
-  auto task_gph = std::make_unique<TaskGraph>();
+  auto task_gph = CHECK_JUST(GlobalTaskGraph::New());
   using std::placeholders::_1;
+  LazyMode::Guard guard(true);
   task_gph->ForEachNode(std::bind(&TaskNode::ProduceAllRegstsAndBindEdges, _1));
   task_gph->ForEachNode(std::bind(&TaskNode::ConsumeAllRegsts, _1));
   task_gph->ForEachNode(std::bind(&TaskNode::PinConsumedRegst, _1));
   task_gph->TopoForEachNode(&TaskNode::Build);
   task_gph->RemoveEmptyRegsts();
-  task_gph->MergeChainAndAddOrderingCtrlEdgeInSameChain();
-  auto IsReachable = Global<OpGraph>::Get()->MakePredicatorIsOpNameDataOrCtrlReachable();
-  if (job_desc.enable_inplace()) { task_gph->EnableInplaceMemSharing(IsReachable); }
   task_gph->TopoForEachNode(&TaskNode::InferTimeShapeIfMeaningful);
+  task_gph->DecideExecutionOrder();
+  task_gph->MergeChainAndAddOrderingCtrlEdgeInSameChain();
+  auto IsReachable = Singleton<OpGraph>::Get()->MakePredicatorIsOpNameDataOrCtrlReachable();
+  if (job_desc.enable_inplace()) { task_gph->EnableInplaceMemSharing(IsReachable); }
   task_gph->ForEachEdge([&](TaskEdge* task_edge) { task_edge->CheckRegstLbiValid(); });
+  compile_tc->Count("[GraphCompile]" + job_name + " BuildTaskGraph", 1, true);
 
-  // Step4: put infomation from task_gph into plan.
+  // Step3: put infomation from task_gph into plan.
   const int64_t node_num = task_gph->node_num();
   const int64_t cpu_num = std::thread::hardware_concurrency();
   const int64_t thread_pool_size = std::min(node_num, cpu_num);
@@ -90,7 +69,7 @@ void Compiler::Compile(Job* job, Plan* plan, bool need_job_complete) const {
           std::unique_lock<std::mutex> guard(mtx);
           if (task_node->GetTaskType() == kNormalForward || task_node->GetTaskType() == kRepeat
               || task_node->GetTaskType() == kAcc) {
-            CreateOpAttributeRef(plan, job_desc.job_id(), &task_proto);
+            PlanUtil::CreateOpAttributeRef(plan, job_desc.job_id(), &task_proto);
           }
           plan->mutable_task()->Add(std::move(task_proto));
         }  // guard(mtx)
@@ -98,17 +77,22 @@ void Compiler::Compile(Job* job, Plan* plan, bool need_job_complete) const {
       counter.Decrease();
     } /* thread_pool.AddWork */);
   } /* task_gph->ForEachNode */);
-  counter.WaitUntilCntEqualZero();
+  counter.WaitForeverUntilCntEqualZero();
   // NOTE(levi): release task_gph here to decrise memory peak.
   task_gph.reset();
+  compile_tc->Count("[GraphCompile]" + job_name + " AddTaskToPlan", 1, true);
 
-  // Step5: post-process for plan and delete Global<OpGraph>.
+  // Step4: post-process for plan and delete Singleton<OpGraph>.
   auto* job_id2job_conf = plan->mutable_job_confs()->mutable_job_id2job_conf();
   (*job_id2job_conf)[GlobalJobDesc().job_id()] = GlobalJobDesc().job_conf();
   // NOTE(chengcheng): infer mem blob id & set inplace & add ctrl
-  IntraJobMemSharingUtil::InferMemBlockId4MemReusedRegst(plan, IsReachable);
+  // TODO(chengcheng): set inplace hint for cpu regst
+  IntraJobMemSharingUtil::InferMemBlockId4MemReusedRegst(plan);
+  PlanUtil::MergeMemBlockIdByLogicalChainId(plan, *job);
   PlanUtil::SetUniqueMemBlockId4UnreusedMemRegst(plan);
-  Global<OpGraph>::Delete();
+  PlanUtil::SetForceInplaceMemBlock(plan);
+  compile_tc->Count("[GraphCompile]" + job_name + " InferMemShare", 1, true);
+  Singleton<OpGraph>::Delete();
 }
 
 }  // namespace oneflow

@@ -14,68 +14,47 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/memory/memory_allocator.h"
-#include "oneflow/core/comm_network/comm_network.h"
 #include "oneflow/core/device/cuda_util.h"
-#include "oneflow/core/job/resource_desc.h"
+#include "oneflow/core/eager/eager_blob_object.h"
 #include "oneflow/core/job/global_for.h"
 #include "oneflow/core/register/blob.h"
 #include "oneflow/core/common/tensor_buffer.h"
 #include "oneflow/core/record/record.pb.h"
+#include "oneflow/core/ep/include/device_manager_registry.h"
 
 namespace oneflow {
 
-void* MemoryAllocatorImpl::Allocate(MemoryCase mem_case, size_t size) {
-  void* ptr = nullptr;
-  if (mem_case.has_host_mem()) {
-    if (mem_case.host_mem().has_cuda_pinned_mem()) {
-#ifdef WITH_CUDA
-      // NOTE(chengcheng):
-      //   All cudaMallocHost MUST set the correct device id to avoid creating CUDA context
-      //   on other GPU which will occopy 500MiB device memory.
-      int64_t device_id = mem_case.host_mem().cuda_pinned_mem().device_id();
-      CudaCurrentDeviceGuard guard(device_id);
-      NumaAwareCudaMallocHost(device_id, &ptr, size);
-#else
-      UNIMPLEMENTED();
-#endif
-    } else {
-      ptr = aligned_alloc(kHostAlignSize, size);
-      CHECK_NOTNULL(ptr);
-    }
-  } else if (mem_case.has_device_cuda_mem()) {
-#ifdef WITH_CUDA
-    CudaCurrentDeviceGuard guard(mem_case.device_cuda_mem().device_id());
-    OF_CUDA_CHECK(cudaMalloc(&ptr, size));
-#else
-    UNIMPLEMENTED();
-#endif
-  } else {
-    UNIMPLEMENTED();
+namespace {
+
+std::shared_ptr<ep::Device> GetAllocationDevice(const MemoryCase& mem_case) {
+  auto device = Singleton<ep::DeviceManagerRegistry>::Get()->GetDevice(mem_case.device_type(),
+                                                                       mem_case.device_id());
+  CHECK(device);
+  return device;
+}
+
+ep::AllocationOptions GetAllocationOptions(const MemoryCase& mem_case) {
+  ep::AllocationOptions options{};
+  if (mem_case.has_pinned_device_type() && mem_case.has_pinned_device_id()) {
+    options.SetPinnedDevice(mem_case.pinned_device_type(), mem_case.pinned_device_id());
   }
+  return options;
+}
+
+}  // namespace
+
+void* MemoryAllocatorImpl::Allocate(const MemoryCase& mem_case, size_t size) {
+  void* ptr = nullptr;
+  std::shared_ptr<ep::Device> device = GetAllocationDevice(mem_case);
+  ep::AllocationOptions options = GetAllocationOptions(mem_case);
+  CHECK_JUST(device->Alloc(options, &ptr, size));
   return ptr;
 }
 
-void MemoryAllocatorImpl::Deallocate(void* ptr, MemoryCase mem_case) {
-  if (mem_case.has_host_mem()) {
-    if (mem_case.host_mem().has_cuda_pinned_mem()) {
-#ifdef WITH_CUDA
-      OF_CUDA_CHECK(cudaFreeHost(ptr));
-#else
-      UNIMPLEMENTED();
-#endif
-    } else {
-      free(ptr);
-    }
-  } else if (mem_case.has_device_cuda_mem()) {
-#ifdef WITH_CUDA
-    CudaCurrentDeviceGuard guard(mem_case.device_cuda_mem().device_id());
-    OF_CUDA_CHECK(cudaFree(ptr));
-#else
-    UNIMPLEMENTED();
-#endif
-  } else {
-    UNIMPLEMENTED();
-  }
+void MemoryAllocatorImpl::Deallocate(void* ptr, const MemoryCase& mem_case) {
+  std::shared_ptr<ep::Device> device = GetAllocationDevice(mem_case);
+  ep::AllocationOptions options = GetAllocationOptions(mem_case);
+  device->Free(options, ptr);
 }
 
 void* MemoryAllocatorImpl::AllocateUnPinnedHostMem(size_t size) {
@@ -84,32 +63,21 @@ void* MemoryAllocatorImpl::AllocateUnPinnedHostMem(size_t size) {
   return ptr;
 }
 
-void MemoryAllocatorImpl::DeallocateUnPinnedHostMem(void* ptr) { free(ptr); }
-
-MemoryAllocator::~MemoryAllocator() {
-  for (std::function<void()> deleter : deleters_) { deleter(); }
+void MemoryAllocatorImpl::DeallocateUnPinnedHostMem(void* ptr) {
+  free(ptr);  // NOLINT
 }
 
-char* MemoryAllocator::Allocate(MemoryCase mem_case, std::size_t size) {
-  const int memset_val = 0;
+MemoryAllocator::~MemoryAllocator() {
+  for (const std::function<void()>& deleter : deleters_) { deleter(); }
+}
+
+char* MemoryAllocator::Allocate(const MemoryCase& mem_case, std::size_t size) {
   char* dptr = static_cast<char*>(MemoryAllocatorImpl::Allocate(mem_case, size));
-  if (mem_case.has_host_mem()) {
-    memset(dptr, memset_val, size);
-  } else if (mem_case.has_device_cuda_mem()) {
-#ifdef WITH_CUDA
-    CudaCurrentDeviceGuard guard(mem_case.device_cuda_mem().device_id());
-    OF_CUDA_CHECK(cudaMemset(dptr, memset_val, size));
-#else
-    UNIMPLEMENTED();
-#endif
-  } else {
-    UNIMPLEMENTED();
-  }
   deleters_.push_front(std::bind(&MemoryAllocator::Deallocate, this, dptr, mem_case));
   return dptr;
 }
 
-void MemoryAllocator::Deallocate(char* dptr, MemoryCase mem_case) {
+void MemoryAllocator::Deallocate(char* dptr, const MemoryCase& mem_case) {
   MemoryAllocatorImpl::Deallocate(static_cast<void*>(dptr), mem_case);
 }
 
@@ -125,6 +93,22 @@ void InitNonPODTypeBlobIfNeed(MemoryAllocator* allocator, Blob* blob_ptr) {
     int64_t elem_cnt = blob_desc.shape().elem_cnt();
     FOR_RANGE(int64_t, idx, 0, elem_cnt) {
       allocator->PlacementNew(&blob_ptr->mut_dptr<TensorBuffer>()[idx]);
+    }
+  }
+}
+
+void InitNonPODTypeEagerBlobObjectIfNeed(MemoryAllocator* allocator,
+                                         vm::EagerBlobObject* eager_blob_object_ptr) {
+  if (eager_blob_object_ptr->data_type() == kOFRecord) {
+    int64_t elem_cnt = eager_blob_object_ptr->shape().elem_cnt();
+    FOR_RANGE(int64_t, idx, 0, elem_cnt) {
+      allocator->PlacementNew(&eager_blob_object_ptr->mut_dptr<OFRecord>()[idx]);
+    }
+  }
+  if (eager_blob_object_ptr->data_type() == kTensorBuffer) {
+    int64_t elem_cnt = eager_blob_object_ptr->shape().elem_cnt();
+    FOR_RANGE(int64_t, idx, 0, elem_cnt) {
+      allocator->PlacementNew(&eager_blob_object_ptr->mut_dptr<TensorBuffer>()[idx]);
     }
   }
 }

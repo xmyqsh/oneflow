@@ -18,17 +18,18 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_bmm(test_case, device):
-    input1 = flow.Tensor(
+    input1 = flow.tensor(
         np.random.randn(10, 3, 4), dtype=flow.float32, device=flow.device(device)
     )
-    input2 = flow.Tensor(
+    input2 = flow.tensor(
         np.random.randn(10, 4, 5), dtype=flow.float32, device=flow.device(device)
     )
     of_out = flow.bmm(input1, input2)
@@ -37,7 +38,7 @@ def _test_bmm(test_case, device):
 
 
 def _test_bmm_backward(test_case, device):
-    input1 = flow.Tensor(
+    input1 = flow.tensor(
         [
             [
                 [-0.0036776792258024216, 1.9946473836898804, -0.423959881067276],
@@ -52,7 +53,7 @@ def _test_bmm_backward(test_case, device):
         device=flow.device(device),
         requires_grad=True,
     )
-    input2 = flow.Tensor(
+    input2 = flow.tensor(
         [
             [
                 [1.118346929550171, -0.930071234703064],
@@ -95,6 +96,20 @@ class TestModule(flow.unittest.TestCase):
         arg_dict["device"] = ["cpu", "cuda"]
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
+
+    @autotest(check_graph=True, rtol=1e-4, atol=1e-3)
+    def test_bmm_with_torch(test_case):
+        device = random_device()
+        mat1 = random_tensor(ndim=3, dim0=2, dim1=4, dim2=3).to(device)
+        mat2 = random_tensor(ndim=3, dim0=2, dim1=3, dim2=4).to(device)
+        y = torch.bmm(mat1, mat2,)
+        return y
+
+    @profile(torch.bmm)
+    def profile_bmm(test_case):
+        mat1 = torch.ones(10, 100, 100)
+        mat2 = torch.ones(10, 100, 100)
+        torch.bmm(mat1, mat2)
 
 
 if __name__ == "__main__":

@@ -24,9 +24,9 @@ import oneflow.unittest
 
 
 def _of_image_flip(images, image_static_shape, flip_code):
-    image_tensors = flow.Tensor(images, dtype=flow.float, device=flow.device("cpu"))
+    image_tensors = flow.tensor(images, dtype=flow.float, device=flow.device("cpu"))
     image_tensor_buffer = flow.tensor_to_tensor_buffer(image_tensors, instance_dims=3)
-    flip_images = flow.nn.image.flip(flip_code)(image_tensor_buffer)
+    flip_images = flow.nn.image.flip()(image_tensor_buffer, flip_code)
     return flip_images.numpy()
 
 
@@ -58,7 +58,8 @@ def _compare_image_flip_with_cv(test_case, image_files):
         image_paddings[
             idx, : image.shape[1], : image.shape[2], : image.shape[3]
         ] = image
-    flip_images = _of_image_flip(image_paddings, image_static_shape, 1)
+    flip_code = flow.ones(image_static_shape[0], dtype=flow.int8)
+    flip_images = _of_image_flip(image_paddings, image_static_shape, flip_code)
     for (image, flip_image) in zip(image_paddings, flip_images):
         exp_flip_image = cv2.flip(image.squeeze(), 1)
         test_case.assertTrue(np.allclose(exp_flip_image, flip_image))
@@ -70,8 +71,8 @@ class TestImageFlip(flow.unittest.TestCase):
         _compare_image_flip_with_cv(
             test_case,
             [
-                "/dataset/mscoco_2017/val2017/000000000139.jpg",
-                "/dataset/mscoco_2017/val2017/000000000632.jpg",
+                flow.unittest.dataset_dir("mscoco_2017/val2017/000000000139.jpg"),
+                flow.unittest.dataset_dir("mscoco_2017/val2017/000000000632.jpg"),
             ],
         )
 

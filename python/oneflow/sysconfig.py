@@ -13,15 +13,23 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import oneflow
 from oneflow.framework.sysconfig import (
     cmake_build_type,
     get_compile_flags,
     get_include,
     get_lib,
     get_link_flags,
+    get_liboneflow_link_flags,
     has_rpc_backend_grpc,
     has_rpc_backend_local,
     with_cuda,
-    with_xla,
+    get_cuda_version,
     with_rdma,
+)
+
+
+from oneflow._oneflow_internal.flags import (
+    with_mlir,
+    with_mlir_cuda_codegen,
 )

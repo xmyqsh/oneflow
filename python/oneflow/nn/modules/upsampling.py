@@ -16,15 +16,11 @@ limitations under the License.
 from typing import Optional, Tuple, Union
 
 import oneflow as flow
-from oneflow.framework.tensor import register_tensor_op
-from oneflow.nn.module import Module
+from oneflow.nn.modules.module import Module
 
 
 class Upsample(Module):
-    """The interface is consistent with PyTorch.    
-    
-    The documentation is referenced from: https://pytorch.org/docs/1.9.0/_modules/torch/nn/modules/upsampling.html#Upsample
-    
+    """    
     Upsamples a given multi-channel 1D (temporal), 2D (spatial) or 3D (volumetric) data.
 
     The input data is assumed to be of the form
@@ -37,6 +33,9 @@ class Upsample(Module):
 
     One can either give a :attr:`scale_factor` or the target output :attr:`size` to
     calculate the output size. (You cannot give both, as it is ambiguous)
+
+    The interface is consistent with PyTorch.
+    The documentation is referenced from: https://pytorch.org/docs/1.10/_modules/torch/nn/modules/upsampling.html.
 
     Args:
         size (int or Tuple[int] or Tuple[int, int] or Tuple[int, int, int], optional):
@@ -85,7 +84,7 @@ class Upsample(Module):
         >>> import numpy as np
         >>> import oneflow as flow
 
-        >>> input = flow.Tensor(np.arange(1, 5).reshape((1, 1, 2, 2)), dtype=flow.float32)
+        >>> input = flow.tensor(np.arange(1, 5).reshape((1, 1, 2, 2)), dtype=flow.float32)
         >>> input = input.to("cuda")
         >>> m = flow.nn.Upsample(scale_factor=2.0, mode="nearest")
         >>> output = m(input)
@@ -161,7 +160,7 @@ class UpsamplingNearest2d(Upsample):
         >>> import numpy as np
         >>> import oneflow as flow
         
-        >>> input = flow.Tensor(np.arange(1, 5).reshape((1, 1, 2, 2)), dtype=flow.float32)
+        >>> input = flow.tensor(np.arange(1, 5).reshape((1, 1, 2, 2)), dtype=flow.float32)
         >>> input = input.to("cuda")
         >>> m = flow.nn.UpsamplingNearest2d(scale_factor=2.0)
         >>> output = m(input)
@@ -215,7 +214,7 @@ class UpsamplingBilinear2d(Upsample):
         >>> import numpy as np
         >>> import oneflow as flow
         
-        >>> input = flow.Tensor(np.arange(1, 5).reshape((1, 1, 2, 2)), dtype=flow.float32)
+        >>> input = flow.tensor(np.arange(1, 5).reshape((1, 1, 2, 2)), dtype=flow.float32)
         >>> input = input.to("cuda")
         >>> m = flow.nn.UpsamplingBilinear2d(scale_factor=2.0)
         >>> output = m(input)

@@ -136,7 +136,7 @@ class CpuMovingAverageMinMaxObserverKernel final : public user_op::OpKernel {
     T* scale_ptr = scale->mut_dptr<T>();
     T* zero_point_ptr = zero_point->mut_dptr<T>();
 
-    int64_t num_elements = in->shape().elem_cnt();
+    int64_t num_elements = in->shape_view().elem_cnt();
 
     if (quantization_formula == "google") {
       if (quantization_scheme == "symmetric") {
@@ -160,11 +160,11 @@ class CpuMovingAverageMinMaxObserverKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_MOVING_AVERAGE_MIN_MAX_OBSERVER_KERNEL(dtype)       \
-  REGISTER_USER_KERNEL("moving_average_min_max_observer")            \
-      .SetCreateFn<CpuMovingAverageMinMaxObserverKernel<dtype>>()    \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kCPU) \
-                       & (user_op::HobDataType("in", 0) == GetDataType<dtype>::value))
+#define REGISTER_MOVING_AVERAGE_MIN_MAX_OBSERVER_KERNEL(dtype)        \
+  REGISTER_USER_KERNEL("moving_average_min_max_observer")             \
+      .SetCreateFn<CpuMovingAverageMinMaxObserverKernel<dtype>>()     \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("in", 0) == GetDataType<dtype>::value))
 
 REGISTER_MOVING_AVERAGE_MIN_MAX_OBSERVER_KERNEL(float);
 REGISTER_MOVING_AVERAGE_MIN_MAX_OBSERVER_KERNEL(double);

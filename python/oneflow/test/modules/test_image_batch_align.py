@@ -51,10 +51,10 @@ def _roundup(x, n):
 class TestImageBatchAlign(flow.unittest.TestCase):
     def test_image_batch_align(test_case):
         image_files = [
-            "/dataset/mscoco_2017/val2017/000000000139.jpg",
-            "/dataset/mscoco_2017/val2017/000000000632.jpg",
-            "/dataset/mscoco_2017/val2017/000000000785.jpg",
-            "/dataset/mscoco_2017/val2017/000000001000.jpg",
+            flow.unittest.dataset_dir("mscoco_2017/val2017/000000000139.jpg"),
+            flow.unittest.dataset_dir("mscoco_2017/val2017/000000000632.jpg"),
+            flow.unittest.dataset_dir("mscoco_2017/val2017/000000000785.jpg"),
+            flow.unittest.dataset_dir("mscoco_2017/val2017/000000001000.jpg"),
         ]
         alignment = 16
         images = _read_images_by_cv(image_files)
@@ -72,7 +72,7 @@ class TestImageBatchAlign(flow.unittest.TestCase):
         images_np_arr_static = np.zeros(image_shape, dtype=np.float32)
         for (idx, np_arr) in enumerate(images):
             images_np_arr_static[idx, : np_arr.shape[0], : np_arr.shape[1], :] = np_arr
-        input = flow.Tensor(
+        input = flow.tensor(
             images_np_arr_static, dtype=flow.float, device=flow.device("cpu")
         )
         images_buffer = flow.tensor_to_tensor_buffer(input, instance_dims=3)

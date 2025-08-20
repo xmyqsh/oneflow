@@ -28,11 +28,11 @@ class LayerNormCpuKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override { TODO(); };
 };
 
-#define REGISTER_LAYER_NORM_CPU_KERNEL(dtype)             \
-  REGISTER_USER_KERNEL("layer_norm")                      \
-      .SetCreateFn<LayerNormCpuKernel<dtype>>()           \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu") \
-                       & (user_op::HobDataType("x", 0) == GetDataType<dtype>::value));
+#define REGISTER_LAYER_NORM_CPU_KERNEL(dtype)                         \
+  REGISTER_USER_KERNEL("layer_norm")                                  \
+      .SetCreateFn<LayerNormCpuKernel<dtype>>()                       \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("x", 0) == GetDataType<dtype>::value));
 
 REGISTER_LAYER_NORM_CPU_KERNEL(float)
 REGISTER_LAYER_NORM_CPU_KERNEL(double)
@@ -48,14 +48,34 @@ class LayerNormGradCpuKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override { TODO(); };
 };
 
-#define REGISTER_LAYER_NORM_GRAD_CPU_KERNEL(dtype)        \
-  REGISTER_USER_KERNEL("layer_norm_grad")                 \
-      .SetCreateFn<LayerNormGradCpuKernel<dtype>>()       \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu") \
-                       & (user_op::HobDataType("dy", 0) == GetDataType<dtype>::value));
+#define REGISTER_LAYER_NORM_GRAD_CPU_KERNEL(dtype)                    \
+  REGISTER_USER_KERNEL("layer_norm_grad")                             \
+      .SetCreateFn<LayerNormGradCpuKernel<dtype>>()                   \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("dy", 0) == GetDataType<dtype>::value));
 
 REGISTER_LAYER_NORM_GRAD_CPU_KERNEL(float)
 REGISTER_LAYER_NORM_GRAD_CPU_KERNEL(double)
+
+template<typename T>
+class FuseLayerNormGradCpuKernel final : public user_op::OpKernel {
+ public:
+  FuseLayerNormGradCpuKernel() = default;
+  ~FuseLayerNormGradCpuKernel() = default;
+
+ private:
+  bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
+  void Compute(user_op::KernelComputeContext* ctx) const override { TODO(); };
+};
+
+#define REGISTER_FUSE_LAYER_NORM_GRAD_CPU_KERNEL(dtype)               \
+  REGISTER_USER_KERNEL("fuse_layer_norm_grad")                        \
+      .SetCreateFn<LayerNormGradCpuKernel<dtype>>()                   \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("dy", 0) == GetDataType<dtype>::value));
+
+REGISTER_FUSE_LAYER_NORM_GRAD_CPU_KERNEL(float)
+REGISTER_FUSE_LAYER_NORM_GRAD_CPU_KERNEL(double)
 
 template<typename T>
 class LayerNormParamGradCpuKernel final : public user_op::OpKernel {
@@ -68,11 +88,11 @@ class LayerNormParamGradCpuKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override { TODO(); };
 };
 
-#define REGISTER_LAYER_NORM_PARAM_GRAD_CPU_KERNEL(dtype)  \
-  REGISTER_USER_KERNEL("layer_norm_param_grad")           \
-      .SetCreateFn<LayerNormParamGradCpuKernel<dtype>>()  \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu") \
-                       & (user_op::HobDataType("dy", 0) == GetDataType<dtype>::value));
+#define REGISTER_LAYER_NORM_PARAM_GRAD_CPU_KERNEL(dtype)              \
+  REGISTER_USER_KERNEL("layer_norm_param_grad")                       \
+      .SetCreateFn<LayerNormParamGradCpuKernel<dtype>>()              \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("dy", 0) == GetDataType<dtype>::value));
 
 REGISTER_LAYER_NORM_PARAM_GRAD_CPU_KERNEL(float)
 REGISTER_LAYER_NORM_PARAM_GRAD_CPU_KERNEL(double)

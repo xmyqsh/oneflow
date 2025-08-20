@@ -19,11 +19,14 @@ limitations under the License.
 #include "oneflow/core/graph/graph.h"
 #include "oneflow/core/job/job_desc.h"
 #include "oneflow/core/job/parallel_desc.h"
-#include "oneflow/core/job/mirrored_parallel.pb.h"
+#include "oneflow/core/job/local_parallel.pb.h"
 #include "oneflow/core/operator/operator.h"
 #include "oneflow/core/common/balanced_splitter.h"
 
 namespace oneflow {
+namespace auto_parallel {
+class SbpConstructor;
+}
 
 class OpEdge;
 class OpGraph;
@@ -31,8 +34,7 @@ class OpGraph;
 class OpNode final : public Node<OpNode, OpEdge> {
  public:
   OF_DISALLOW_COPY_AND_MOVE(OpNode);
-  explicit OpNode(const std::shared_ptr<const ParallelDesc>& parallel_desc,
-                  const OperatorConf& op_conf);
+  explicit OpNode(Symbol<ParallelDesc> parallel_desc, const OperatorConf& op_conf);
   ~OpNode() = default;
 
   // Getters
@@ -40,14 +42,13 @@ class OpNode final : public Node<OpNode, OpEdge> {
   const Operator& op() const { return *op_; }
   std::shared_ptr<const Operator> shared_op() const { return op_; }
   const ParallelDesc& parallel_desc() const { return *parallel_desc_; }
-  const cfg::SbpSignature& sbp_signature() const { return *CHECK_JUST(op().sbp_signature()); }
-  const cfg::NdSbpSignature& nd_sbp_signature() const {
-    return *CHECK_JUST(op().nd_sbp_signature());
-  }
-  const cfg::SbpParallel& SbpParallel4Lbi(const LogicalBlobId& lbi) const;
-  const cfg::SbpParallel& SbpParallel4BnInOp(const std::string& bn_in_op) const;
-  const cfg::NdSbp& NdSbp4Lbi(const LogicalBlobId& lbi) const;
-  const cfg::NdSbp& NdSbp4BnInOp(const std::string& bn_in_op) const;
+  Symbol<ParallelDesc> parallel_desc_sym() const { return parallel_desc_; }
+  const SbpSignature& sbp_signature() const { return *CHECK_JUST(op().sbp_signature()); }
+  const NdSbpSignature& nd_sbp_signature() const { return *CHECK_JUST(op().nd_sbp_signature()); }
+  const SbpParallel& SbpParallel4Lbi(const LogicalBlobId& lbi) const;
+  const SbpParallel& SbpParallel4BnInOp(const std::string& bn_in_op) const;
+  const NdSbp& NdSbp4Lbi(const LogicalBlobId& lbi) const;
+  const NdSbp& NdSbp4BnInOp(const std::string& bn_in_op) const;
   const BlobDesc& LogicalBlobDesc4Lbi(const LogicalBlobId& lbi) const;
   const OpNode& ProducerOpNode4Lbi(const LogicalBlobId& lbi) const;
   const OpNode& SrcNode4Ibn(const std::string& bn_in_op) const;
@@ -57,6 +58,7 @@ class OpNode final : public Node<OpNode, OpEdge> {
  private:
   friend class OpGraph;
   friend class OpEdge;
+  friend class auto_parallel::SbpConstructor;
 
   // Setters
   Operator* mut_op() { return op_.get(); }
@@ -65,11 +67,11 @@ class OpNode final : public Node<OpNode, OpEdge> {
   void InitLbi2SourceNode();
   void InitLbi2NdSbp();
 
-  std::shared_ptr<const ParallelDesc> parallel_desc_;
+  Symbol<ParallelDesc> parallel_desc_;
   std::shared_ptr<Operator> op_;
   HashSet<std::string> ibns_;
   HashMap<LogicalBlobId, OpNode*> lbi2source_node_;
-  HashMap<LogicalBlobId, cfg::NdSbp> lbi2nd_sbp_;
+  HashMap<LogicalBlobId, NdSbp> lbi2nd_sbp_;
   std::vector<std::pair<const OpNode*, int32_t>> input_index2producer_and_output_index_;
 };
 
@@ -86,6 +88,8 @@ class OpEdge final : public Edge<OpNode, OpEdge> {
   const std::vector<LogicalBlobId>& lbis() const { return *lbis_; }
   const HashMap<LogicalBlobId, std::string>& lbi2obn() const { return *lbi2obn_; }
   const HashMap<LogicalBlobId, std::vector<std::string>>& lbi2ibns() const { return *lbi2ibns_; }
+
+  bool NeedBoxing() const;
   std::string VisualStr() const override;
 
  private:
@@ -108,9 +112,8 @@ class OpGraph final : public Graph<OpNode, OpEdge> {
   const OpNode* OpNode4OpName(const std::string& name) const;
 
   int64_t GetParallelNum(const std::string& op_name) const;
-  const cfg::SbpParallel& GetSbpParallel(const std::string& op_name,
-                                         const LogicalBlobId& lbi) const;
-  const cfg::NdSbp& GetNdSbp(const std::string& op_name, const LogicalBlobId& lbi) const;
+  const SbpParallel& GetSbpParallel(const std::string& op_name, const LogicalBlobId& lbi) const;
+  const NdSbp& GetNdSbp(const std::string& op_name, const LogicalBlobId& lbi) const;
   DataType GetBlobDataType(const LogicalBlobId& lbi) const;
   const BlobDesc& GetLogicalBlobDesc(const LogicalBlobId& lbi) const;
 
@@ -119,6 +122,7 @@ class OpGraph final : public Graph<OpNode, OpEdge> {
 
   void ForEachDataAndCtrlInNode(OpNode* node, const std::function<void(OpNode*)>& Handler) const;
   void ForEachDataAndCtrlOutNode(OpNode* node, const std::function<void(OpNode*)>& Handler) const;
+  void TopoForEachNodeWithCtrlEdge(const std::function<void(OpNode*)>& NodeHandler) const;
   // NOTE(chengcheng): For topo for each with ctrl edges. OpEdge is ONLY data edge.
   std::list<OpNode*> DataOrCtrlSourceNodes() const;
 
@@ -128,15 +132,21 @@ class OpGraph final : public Graph<OpNode, OpEdge> {
 
   Maybe<void> Init(const Job& job);
 
+  std::function<bool(const OpNode* src, const OpNode* dst)> CreatePredicatorIsReachable() const;
+  // Print the graph with SBP in order
+  void PrintSBPGraphDebugInfo() const;
+
  private:
+  friend class auto_parallel::SbpConstructor;
+
   void InitNodes(const Job& job);
   void InitEdges();
   void InitProducerOpName2CtrlConsumerOpNames(const Job& job);
   void CheckIsDAG() const;
   void InferBlobLastUsed() const;
   void InferTimeShape() const;
-  void InferOpNodeNdSbpSignature(OpNode* op_node, const cfg::NdSbpSignature& nd_sbp_sig_conf) const;
-  Maybe<void> InferOpNodeMirroredSignature(OpNode* op_node, bool is_mirrored_conf) const;
+  void InferOpNodeNdSbpSignature(OpNode* op_node, const NdSbpSignature& nd_sbp_sig_conf) const;
+  Maybe<void> InferOpNodeLocalSignature(OpNode* op_node, bool is_local_conf) const;
   Maybe<void> InferLogicalBlobDesc(const Job& job) const;
   std::string GetOpNameKey(const std::string& op_name, const LogicalBlobId& lbi) const;
   LogicalBlobId GetLogicalBlobIdKey(const std::string& op_name, const LogicalBlobId& lbi) const;
@@ -146,6 +156,13 @@ class OpGraph final : public Graph<OpNode, OpEdge> {
   HashMap<std::string, OpNode*> op_name2op_node_;
   std::list<std::string> op_names_;
   HashMap<std::string, HashSet<std::string>> producer_op_name2ctrl_consumer_op_names_;
+};
+
+class OpGraphSingletonGuard {
+ public:
+  OF_DISALLOW_COPY_AND_MOVE(OpGraphSingletonGuard);
+  explicit OpGraphSingletonGuard(const Job& job);
+  ~OpGraphSingletonGuard();
 };
 
 }  // namespace oneflow

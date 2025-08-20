@@ -13,13 +13,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#include "oneflow/core/framework/mutable_attr_map.h"
 #include "oneflow/core/framework/op_builder.h"
 #include "oneflow/core/framework/op_expr.h"
+#include "oneflow/core/framework/op_interpreter.h"
 #include "oneflow/core/framework/op_interpreter/op_interpreter_util.h"
 #include "oneflow/core/framework/tensor.h"
 #include "oneflow/core/framework/tensor_tuple.h"
 #include "oneflow/core/functional/function_library.h"
-#include "oneflow/core/functional/scalar.h"
+#include "oneflow/core/framework/nd_sbp.h"
 
 namespace oneflow {
 namespace one {
@@ -30,12 +32,12 @@ namespace impl {
 class ImageFlipFuntor {
  public:
   ImageFlipFuntor() {
-    op_ = CHECK_JUST(one::OpBuilder("image_flip").Input("in").Output("out").Build());
+    op_ = CHECK_JUST(
+        one::OpBuilder("image_flip").Input("in").Input("flip_code").Output("out").Build());
   }
-  Maybe<Tensor> operator()(const std::shared_ptr<one::Tensor>& x, const int32_t& flip_code) const {
-    MutableAttrMap attrs;
-    JUST(attrs.SetAttr<int32_t>("flip_code", flip_code));
-    return OpInterpUtil::Dispatch<Tensor>(*op_, {x}, attrs);
+  Maybe<Tensor> operator()(const std::shared_ptr<one::Tensor>& x,
+                           const std::shared_ptr<one::Tensor>& flip_code) const {
+    return OpInterpUtil::Dispatch<Tensor>(*op_, {x, flip_code});
   }
 
  private:

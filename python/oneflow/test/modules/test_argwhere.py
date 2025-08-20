@@ -18,16 +18,18 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+from packaging import version
+from oneflow.test_utils.automated_test_util import *
+import torch as torch_original
 
 
 def _test_argwhere(test_case, shape, device):
     np_input = np.random.randn(*shape)
-    input = flow.Tensor(np_input, device=flow.device(device))
+    input = flow.tensor(np_input, dtype=flow.float32, device=flow.device(device))
     of_out = flow.argwhere(input)
     np_out = np.argwhere(np_input)
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 0.0001, 0.0001))
@@ -48,9 +50,20 @@ class TestArgwhere(flow.unittest.TestCase):
     @autotest(n=5, rtol=1e-5, atol=1e-5)
     def test_argwhere_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(ndim=random(2, 5).to(int)).to(device)
+        x = random_tensor(ndim=random(2, 5).to(int)).to(device)
         y = torch.argwhere(x)
         return y
+
+    has_pytorch_1_11 = version.parse(torch_original.__version__) >= version.parse(
+        "1.11.0"
+    )
+
+    @unittest.skipIf(
+        not has_pytorch_1_11, "torch.argwhere only exists in PyTorch >= 1.11.0"
+    )
+    @profile(torch.argwhere if has_pytorch_1_11 else None)
+    def profile_argwhere(test_case):
+        torch.argwhere(torch.ones(3, 3, 100, 100))
 
 
 if __name__ == "__main__":

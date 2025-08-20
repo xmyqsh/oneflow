@@ -18,7 +18,7 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
@@ -26,7 +26,7 @@ import oneflow.unittest
 
 def _test_softplus_impl(test_case, shape, device):
     np_input = np.random.randn(*shape)
-    of_input = flow.Tensor(
+    of_input = flow.tensor(
         np_input, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     np_x_grad = np.exp(np_input) / (1 + np.exp(np_input))

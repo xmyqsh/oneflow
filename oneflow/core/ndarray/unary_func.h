@@ -67,6 +67,17 @@ struct UnaryFuncExp final {
 #endif  // defined(__CUDA_ARCH__)
   }
 };
+
+template<>
+struct UnaryFuncExp<bool> final {
+  static OF_DEVICE_FUNC bool Invoke(const bool x) {
+#if defined(__CUDA_ARCH__)
+    return static_cast<bool>(exp(static_cast<float>(x)));
+#else
+    return static_cast<bool>(std::exp(static_cast<float>(x)));
+#endif  // defined(__CUDA_ARCH__)
+  }
+};
 SPECIALIZE_CONST_TYPE_UNARY_FUNC(UnaryFuncExp);
 
 template<>
@@ -102,7 +113,39 @@ struct UnaryFuncExp<half> final {
     return __float2half(std::exp(__half2float(x)));
   }
 };
+
+template<>
+struct UnaryFuncNegative<cuComplex> final {
+  static __device__ __forceinline__ const cuComplex Invoke(const cuComplex x) {
+    return cuComplex{-x.x, -x.y};
+  }
+};
+template<>
+struct UnaryFuncExp<cuComplex> final {
+  static __device__ __forceinline__ const cuComplex Invoke(const cuComplex x) {
+    return cuComplex{exp(x.x) * cos(x.y), exp(x.x) * sin(x.y)};
+  }
+};
+
+template<>
+struct UnaryFuncNegative<cuDoubleComplex> final {
+  static __device__ __forceinline__ const cuDoubleComplex Invoke(const cuDoubleComplex x) {
+    return cuDoubleComplex{-x.x, -x.y};
+  }
+};
+template<>
+struct UnaryFuncExp<cuDoubleComplex> final {
+  static __device__ __forceinline__ const cuDoubleComplex Invoke(const cuDoubleComplex x) {
+    return cuDoubleComplex{exp(x.x) * cos(x.y), exp(x.x) * sin(x.y)};
+  }
+};
 #endif
+
+template<typename T>
+struct UnaryFuncLogicalNot final {
+  static OF_DEVICE_FUNC bool Invoke(const T x) { return !x; }
+};
+SPECIALIZE_CONST_TYPE_UNARY_FUNC(UnaryFuncLogicalNot);
 
 }  // namespace oneflow
 

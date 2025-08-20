@@ -15,19 +15,19 @@ limitations under the License.
 */
 #include "oneflow/user/kernels/arg_where_kernel_util.h"
 #include "oneflow/core/common/nd_index_offset_helper.h"
-#include "oneflow/core/common/fixed_vector.h"
+#include "oneflow/core/common/small_vector.h"
 #include "oneflow/core/kernel/kernel_util.h"
 
 namespace oneflow {
 
 template<typename IN_T, typename OUT_T, int NDIM>
 struct ArgWhereKernelUtil<DeviceType::kCPU, IN_T, OUT_T, NDIM> {
-  static void ArgWhere(DeviceCtx* ctx, const ShapeView& input_shape, const IN_T* input_ptr,
+  static void ArgWhere(ep::Stream* stream, const ShapeView& input_shape, const IN_T* input_ptr,
                        void* temp_storage, size_t temp_storage_bytes, OUT_T* output_ptr,
                        OUT_T* output_size_ptr) {
     // deal with empty blob
     if (input_shape.elem_cnt() == 0) {
-      KernelUtil<DeviceType::kCPU, OUT_T>::Set(ctx, static_cast<OUT_T>(0), output_size_ptr);
+      Memset<DeviceType::kCPU>(stream, output_size_ptr, 0, sizeof(OUT_T));
       return;
     }
 
@@ -47,9 +47,33 @@ struct ArgWhereKernelUtil<DeviceType::kCPU, IN_T, OUT_T, NDIM> {
     *output_size_ptr = true_cnt;
   }
 
-  static size_t GetWorkspaceBytesSize(DeviceCtx* ctx, int64_t elem_cnt) { return 0; }
+  static size_t GetWorkspaceBytesSize(ep::Stream* stream, int64_t elem_cnt) { return 0; }
 };
 
 INSTANTIATE_ARG_WHERE_KERNEL_UTIL_FOR_DEVICE(DeviceType::kCPU)
+
+#define INSTANTIATE_CPU_FLOAT16_ARG_WHERE_KERNEL_UTIL                                              \
+  OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(INSTANTIATE_ARG_WHERE_KERNEL_UTIL_WITH_DTYPE_PAIR,              \
+                                   (DeviceType::kCPU), FLOAT16_DATA_TYPE_SEQ, INDEX_DATA_TYPE_SEQ, \
+                                   DIM_SEQ)
+
+INSTANTIATE_CPU_FLOAT16_ARG_WHERE_KERNEL_UTIL
+
+template<DeviceType device_type, typename IN_T, typename OUT_T>
+void SetOutputSize(ep::Stream* stream, const IN_T* input_ptr, OUT_T* output_size_ptr) {
+  if (*input_ptr == GetZeroVal<IN_T>()) {
+    *output_size_ptr = GetZeroVal<OUT_T>();
+  } else {
+    *output_size_ptr = GetOneVal<OUT_T>();
+  }
+}
+
+INSTANTIATE_SET_OUTPUT_SIZE_FOR_DEVICE(DeviceType::kCPU)
+
+#define INSTANTIATE_CPU_FLOAT16_SET_OUTPUT_SIZE                                 \
+  OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(INSTANTIATE_SET_OUTPUT_SIZE_WITH_DTYPE_PAIR, \
+                                   (DeviceType::kCPU), FLOAT16_DATA_TYPE_SEQ, INDEX_DATA_TYPE_SEQ)
+
+INSTANTIATE_CPU_FLOAT16_SET_OUTPUT_SIZE
 
 }  // namespace oneflow

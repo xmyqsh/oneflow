@@ -13,93 +13,45 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "oneflow/core/vm/stream.msg.h"
-#include "oneflow/core/vm/thread_ctx.msg.h"
+#include "oneflow/core/vm/stream.h"
+#include "oneflow/core/vm/thread_ctx.h"
 #include "oneflow/core/common/util.h"
+#include "oneflow/core/common/cpp_attribute.h"
+#include "oneflow/core/framework/device.h"
+#include "oneflow/core/vm/stream_create_stream_policy.h"
+#include "oneflow/core/framework/stream_on_independent_thread.h"
 
 namespace oneflow {
 namespace vm {
 
-void Stream::__Init__(ThreadCtx* thread_ctx, const StreamId& stream_id,
-                      const int64_t max_device_num_per_machine) {
+void Stream::__Init__(ThreadCtx* thread_ctx, Symbol<Device> device, StreamType stream_type,
+                      const intrusive::shared_ptr<Dependence>& schedule_local_dep_object,
+                      const std::vector<intrusive::shared_ptr<Dependence>>& transport_dependences) {
   set_thread_ctx(thread_ctx);
-  mut_stream_id()->CopyFrom(stream_id);
-  // InitDeviceCtx may use max_device_num_per_machine,
-  // so max_device_num_per_machine must be set before InitDeviceCtx
-  set_max_device_num_per_machine(max_device_num_per_machine);
-  stream_type().InitDeviceCtx(mut_device_ctx(), this);
+  device_ = device;
+  stream_type_ = stream_type;
+  stream_policy_ = CHECK_JUST(CreateStreamPolicy::Visit(stream_type, device));
+  schedule_local_dep_object_ = schedule_local_dep_object;
+  transport_dependences_ = transport_dependences;
+  on_scheduler_thread_ = stream_policy_->OnSchedulerThread(stream_type);
 }
 
-int64_t Stream::machine_id() const { return global_device_id() / max_device_num_per_machine(); }
+int64_t Stream::device_id() const { return device_->device_id(); }
 
-int64_t Stream::device_id() const { return global_device_id() % max_device_num_per_machine(); }
-
-const StreamType& Stream::stream_type() const {
-  return thread_ctx().stream_rt_desc().stream_type();
-}
-
-const StreamTypeId& Stream::stream_type_id() const {
-  return thread_ctx().stream_rt_desc().stream_type_id();
-}
-
-ObjectMsgPtr<Instruction> Stream::NewInstruction(
-    InstructionMsg* instr_msg, const std::shared_ptr<const ParallelDesc>& parallel_desc) {
-  if (free_instruction_list().empty()) {
-    return ObjectMsgPtr<Instruction>::NewFrom(mut_allocator(), instr_msg, this, parallel_desc);
+char* Stream::CheckSizeAndGetTmpSmallPinnedMemPtr(size_t size) {
+  static constexpr int kSmallSize = 512;
+  CHECK_LE(size, kSmallSize);
+  if (!static_cast<bool>(small_pinned_mem_ptr_)) {
+    auto* ep_device = stream_policy_->stream()->device();
+    void* mem_ptr = nullptr;
+    CHECK_JUST(ep_device->AllocPinned(ep::AllocationOptions{}, &mem_ptr, kSmallSize));
+    std::function<void(char*)> Deleter = [ep_device](char* ptr) {
+      ep_device->FreePinned(ep::AllocationOptions{}, ptr);
+    };
+    char* ptr = reinterpret_cast<char*>(mem_ptr);
+    small_pinned_mem_ptr_ = decltype(small_pinned_mem_ptr_)(ptr, Deleter);
   }
-  ObjectMsgPtr<Instruction> instruction = mut_free_instruction_list()->PopFront();
-  instruction->__Init__(instr_msg, this, parallel_desc);
-  return instruction;
-}
-
-void Stream::MoveToFreeList(ObjectMsgPtr<Instruction>&& instruction) {
-  CHECK_EQ(instruction->ref_cnt(), 1);
-  instruction->clear_instr_msg();
-  auto* instruction_ptr = instruction.Mutable();
-  mut_free_instruction_list()->EmplaceBack(std::move(instruction));
-  instruction_ptr->__Delete__();
-}
-
-void Stream::MoveFromZombieListToFreeList() {
-  auto* zombie_list = mut_zombie_instruction_list();
-  static const size_t kTryCount = 2;
-  for (int i = 0; i < kTryCount; ++i) {
-    ObjectMsgPtr<Instruction> first = zombie_list->Begin();
-    if (!first) { break; }
-    zombie_list->Erase(first.Mutable());
-    size_t ref_cnt = first->ref_cnt();
-    if (ref_cnt == 1) {
-      MoveToFreeList(std::move(first));
-    } else if (ref_cnt == 2) {
-      // put `first` back to zombie_list because a worker is holding a reference to `first`
-      zombie_list->EmplaceBack(std::move(first));
-    } else {
-      InstructionProto proto;
-      first->instr_msg().ToProto(&proto);
-      UNIMPLEMENTED() << "ref_cnt: " << ref_cnt << " first->ref_cnt():" << first->ref_cnt() << "\n"
-                      << proto.DebugString();
-    }
-  }
-}
-
-void Stream::DeleteInstruction(ObjectMsgPtr<Instruction>&& instruction) {
-  CHECK(instruction->is_pending_instruction_link_empty());
-  CHECK(instruction->is_instruction_link_empty());
-  // the value of instruction->ref_cnt() may be updated by a worker thread
-  size_t ref_cnt = instruction->ref_cnt();
-  if (ref_cnt == 1) {
-    MoveToFreeList(std::move(instruction));
-  } else if (ref_cnt == 2) {
-    // a worker is holding a reference to `instruction`
-    mut_zombie_instruction_list()->EmplaceBack(std::move(instruction));
-  } else {
-    InstructionProto proto;
-    instruction->instr_msg().ToProto(&proto);
-    UNIMPLEMENTED() << "ref_cnt: " << ref_cnt
-                    << " instruction->ref_cnt():" << instruction->ref_cnt() << "\n"
-                    << proto.DebugString();
-  }
-  MoveFromZombieListToFreeList();
+  return small_pinned_mem_ptr_.get();
 }
 
 }  // namespace vm

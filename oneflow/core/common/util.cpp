@@ -23,6 +23,7 @@ limitations under the License.
 
 #ifdef __linux__
 #include <sys/sysinfo.h>
+#include <unistd.h>
 #endif
 
 namespace oneflow {
@@ -69,8 +70,15 @@ double oneflow_cast(const std::string& s) {
 // COMMAND(feenableexcept(FE_ALL_EXCEPT & ~FE_INEXACT & ~FE_UNDERFLOW));
 #endif
 
-void AbortSignalHandler(int signal) { exit(-1); }
-
+// If the interrupt during object malloc is changed to exit, the exit function indicates a normal
+// exit, triggering the object destructor function and then triggering object free. Since there is a
+// lock in malloc, if malloc and free obtain the same lock, it can cause a deadlock, which prevents
+// the process from exiting. After calling abort, the OS forces the program to exit,
+// relying on the OS to do resource cleanup, which can avoid the deadlock issue.
+// Process inability to exit can be more troublesome than potential resource leaks. If we find that
+// abort causes unreleased resources later, we can use exit in a local scope rather than globally.
+// Reference: https://github.com/Oneflow-Inc/OneTeam/issues/1954
+void AbortSignalHandler(int signal) { std::abort(); }
 COMMAND(std::signal(SIGINT, AbortSignalHandler));
 
 size_t GetAvailableCpuMemSize() {
@@ -91,8 +99,7 @@ size_t GetAvailableCpuMemSize() {
     CHECK_EQ(token, "kB");
     return mem_available * 1024;
   }
-  LOG(FATAL) << "can't find MemAvailable in /proc/meminfo";
-  return 0;
+  return sysconf(_SC_PAGESIZE) * sysconf(_SC_AVPHYS_PAGES);
 #elif defined(__APPLE__)
   // macOS will eagerly make use of all memory so there is no point querying it
   return std::numeric_limits<size_t>::max();
@@ -129,6 +136,17 @@ bool StringToInteger(const std::string& str, int64_t* value) {
   }
 }
 
+bool StringToFloat(const std::string& str, double* value) {
+  char* end = nullptr;
+  double v = std::strtof(str.data(), &end);
+  if (end == str.data()) {
+    return false;
+  } else {
+    *value = v;
+    return true;
+  }
+}
+
 }  // namespace
 
 bool ParseBooleanFromEnv(const std::string& env_var, bool default_value) {
@@ -149,6 +167,14 @@ int64_t ParseIntegerFromEnv(const std::string& env_var, int64_t default_value) {
   } else {
     return default_value;
   }
+}
+
+double ParseFloatFromEnv(const std::string& env_var, double default_value) {
+  const char* env_p = std::getenv(env_var.c_str());
+  if (env_p == nullptr) { return default_value; }
+  double value = default_value;
+  StringToFloat(env_p, &value);
+  return value;
 }
 
 std::string GetStringFromEnv(const std::string& env_var, const std::string& default_value) {

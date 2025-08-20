@@ -114,9 +114,9 @@ class GpuQuantizationKernel final : public user_op::OpKernel {
     const int32_t quantization_bit = ctx->Attr<int32_t>("quantization_bit");
     const std::string quantization_formula = ctx->Attr<std::string>("quantization_formula");
 
-    const int64_t elements = in->shape().elem_cnt();
-    const int64_t panel_size = in->shape().Count(1);
-    const int64_t scale_size = scale->shape().elem_cnt();
+    const int64_t elements = in->shape_view().elem_cnt();
+    const int64_t panel_size = in->shape_view().Count(1);
+    const int64_t scale_size = scale->shape_view().elem_cnt();
 
     // round to even
     auto origin_round_mode = std::fegetround();
@@ -124,16 +124,16 @@ class GpuQuantizationKernel final : public user_op::OpKernel {
 
     if (quantization_formula == "google") {
       if (quantization_scheme == "symmetric") {
-        RUN_CUDA_KERNEL((QuantizationSymmetric<T>), ctx->device_ctx(), elements, in->dptr<T>(),
+        RUN_CUDA_KERNEL((QuantizationSymmetric<T>), ctx->stream(), elements, in->dptr<T>(),
                         scale->dptr<T>(), scale_size, elements, panel_size, quantization_bit,
                         out->mut_dptr<T>());
       } else {  // quantization_scheme == "affine"
-        RUN_CUDA_KERNEL((QuantizationAffine<T>), ctx->device_ctx(), elements, in->dptr<T>(),
+        RUN_CUDA_KERNEL((QuantizationAffine<T>), ctx->stream(), elements, in->dptr<T>(),
                         scale->dptr<T>(), zero_point->dptr<T>(), scale_size, elements, panel_size,
                         quantization_bit, out->mut_dptr<T>());
       }
     } else if (quantization_formula == "cambricon") {
-      RUN_CUDA_KERNEL((QuantizationCambricon<T>), ctx->device_ctx(), elements, in->dptr<T>(),
+      RUN_CUDA_KERNEL((QuantizationCambricon<T>), ctx->stream(), elements, in->dptr<T>(),
                       scale->dptr<T>(), scale_size, elements, panel_size, quantization_bit,
                       out->mut_dptr<T>());
     } else {
@@ -146,11 +146,11 @@ class GpuQuantizationKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_QUANTIZATION_KERNEL(dtype)                          \
-  REGISTER_USER_KERNEL("quantization")                               \
-      .SetCreateFn<GpuQuantizationKernel<dtype>>()                   \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kGPU) \
-                       & (user_op::HobDataType("in", 0) == GetDataType<dtype>::value))
+#define REGISTER_QUANTIZATION_KERNEL(dtype)                            \
+  REGISTER_USER_KERNEL("quantization")                                 \
+      .SetCreateFn<GpuQuantizationKernel<dtype>>()                     \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCUDA) \
+                       && (user_op::HobDataType("in", 0) == GetDataType<dtype>::value))
 
 REGISTER_QUANTIZATION_KERNEL(float);
 REGISTER_QUANTIZATION_KERNEL(double);

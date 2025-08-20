@@ -19,19 +19,19 @@ from collections import OrderedDict
 
 import numpy as np
 import oneflow as flow
-
 import oneflow.unittest
-from test_util import GenArgList
+
+from oneflow.test_utils.test_util import GenArgList
 
 
-def _test_rand(test_case, device, shape, low, high):
+def _test_randint(test_case, device, shape, low, high):
     y1 = flow.randint(low, high, shape, device=flow.device(device))
     y2 = flow.randint(low, high, shape, device=flow.device(device))
-    test_case.assertFalse(np.all(y1.numpy() == y2.numpy()))
+    test_case.assertFalse(np.allclose(y1.numpy(), y2.numpy(), atol=1e-4, rtol=1e-4))
     test_case.assertTrue(shape == y1.shape)
 
 
-def _test_0d_rand(test_case, device, shape, low, high):
+def _test_0d_randint(test_case, device, shape, low, high):
     y1 = flow.randint(low, high, shape, device=flow.device(device))
     y2 = flow.randint(low, high, shape, device=flow.device(device))
     test_case.assertTrue(
@@ -41,19 +41,17 @@ def _test_0d_rand(test_case, device, shape, low, high):
 
 
 def _test_different_dtype(test_case, device, shape, low, high):
-    y1 = flow.randint(low, high, shape, dtype=flow.float32, device=flow.device(device))
-    y2 = flow.randint(low, high, shape, dtype=flow.float64, device=flow.device(device))
-    test_case.assertTrue(not np.allclose(y1.numpy(), y2.numpy(), atol=1e-4, rtol=1e-4))
-    test_case.assertTrue(shape == y1.shape)
-
-
-def _test_backward(test_case, device, shape, low, high):
-    x = flow.randint(low, high, shape, device=flow.device(device), requires_grad=True)
-    y = x.sum()
-    y.backward()
-    test_case.assertTrue(
-        np.allclose(np.ones(shape), x.grad.numpy(), atol=1e-4, rtol=1e-4)
-    )
+    for dtype in [
+        flow.uint8,
+        flow.int8,
+        flow.int32,
+        flow.int64,
+        flow.float32,
+        flow.float64,
+    ]:
+        y = flow.randint(low, high, shape, dtype=dtype, device=flow.device(device))
+        test_case.assertTrue(y.dtype == dtype)
+        test_case.assertTrue(y.shape == shape)
 
 
 def _test_with_generator(test_case, device, shape, low, high):
@@ -62,18 +60,17 @@ def _test_with_generator(test_case, device, shape, low, high):
     y1 = flow.randint(
         low, high, shape, dtype=flow.float32, device=flow.device(device), generator=gen
     )
-    y1_np = y1.numpy()
     gen.manual_seed(0)
     y2 = flow.randint(
         low, high, shape, dtype=flow.float32, device=flow.device(device), generator=gen
     )
-    test_case.assertTrue(np.allclose(y1_np, y2.numpy(), atol=1e-4, rtol=1e-4))
+    test_case.assertTrue(np.allclose(y1.numpy(), y2.numpy(), atol=1e-4, rtol=1e-4))
 
 
 def _test_high(test_case, device, shape, low, high):
-    y1 = flow.randint(low, high, shape, device=flow.device(device))
-    y2 = flow.randint(low, high, shape, device=flow.device(device))
-    test_case.assertFalse(np.all(y1.numpy() == y2.numpy()))
+    y1 = flow._C.randint(high, shape, device=flow.device(device))
+    y2 = flow._C.randint(high, shape, device=flow.device(device))
+    test_case.assertFalse(np.allclose(y1.numpy(), y2.numpy(), atol=1e-4, rtol=1e-4))
     test_case.assertTrue(shape == y1.shape)
 
 
@@ -83,21 +80,27 @@ def _test_0rank(test_case, device, shape, low, high):
 
 
 @flow.unittest.skip_unless_1n1d()
-@unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
 class TestRandint(flow.unittest.TestCase):
-    def test_consistent_naive(test_case):
-        placement = flow.placement("cpu", {0: [0]})
-        sbp = (flow.sbp.broadcast,)
-        x = flow.randint(0, 16, (10, 1), placement=placement, sbp=sbp)
-        test_case.assertEqual(x.sbp, sbp)
-        test_case.assertEqual(x.placement, placement)
+    def test_global_different_types(test_case):
+        for dtype in [
+            flow.int8,
+            flow.int32,
+            flow.int64,
+            flow.float32,
+            flow.float64,
+        ]:
+            placement = flow.placement("cpu", ranks=[0])
+            sbp = (flow.sbp.broadcast,)
+            x = flow.randint(0, 16, (10, 1), placement=placement, sbp=sbp, dtype=dtype)
+            test_case.assertEqual(x.dtype, dtype)
+            test_case.assertEqual(x.sbp, sbp)
+            test_case.assertEqual(x.placement, placement)
 
     def test_randint(test_case):
         arg_dict = OrderedDict()
         arg_dict["test_fun"] = [
-            _test_rand,
+            _test_randint,
             _test_different_dtype,
-            _test_backward,
             _test_with_generator,
         ]
         arg_dict["device"] = ["cpu", "cuda"]
@@ -109,7 +112,7 @@ class TestRandint(flow.unittest.TestCase):
 
     def test_0d_randint(test_case):
         arg_dict = OrderedDict()
-        arg_dict["test_fun"] = [_test_0d_rand]
+        arg_dict["test_fun"] = [_test_0d_randint]
         arg_dict["device"] = ["cpu", "cuda"]
         arg_dict["shape"] = [(2, 0, 4), (2, 0, 2)]
         arg_dict["low"] = [i for i in range(10)]
@@ -136,6 +139,14 @@ class TestRandint(flow.unittest.TestCase):
         arg_dict["high"] = [1000 + np.random.randint(1, 10) for i in range(10)]
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
+
+
+@unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
+@flow.unittest.skip_unless_1n2d()
+class TestRandintOnNonDefaultDevice(flow.unittest.TestCase):
+    def test_non_default_device(test_case):
+        x = flow.randint(low=1, high=2, size=flow.Size((2, 3)), device="cuda:1")
+        test_case.assertEqual(x.device, flow.device("cuda:1"))
 
 
 if __name__ == "__main__":

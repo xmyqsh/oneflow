@@ -33,15 +33,10 @@ class ResourceDesc;
 
 Maybe<OFRecord> ParseMachineAndDeviceIdList(const ParallelConf& parallel_conf);
 
-Maybe<void> ParseDeviceNameConf(const std::string& device_name, int64_t* mchn_id,
-                                std::string* device_id_str);
+Maybe<std::pair<int64_t, std::string>> ParseDeviceNameConf(const std::string& device_name);
 
 class ParallelContext;
 class Device;
-
-namespace cfg {
-class ParallelConf;
-}
 
 class ParallelDesc final {
  public:
@@ -58,7 +53,7 @@ class ParallelDesc final {
   Maybe<void> MaybeInit(const ParallelConf& user_conf);
 
   // Getters
-  const Maybe<int64_t>& symbol_id() const { return symbol_id_; }
+  const Optional<int64_t>& symbol_id() const { return symbol_id_; }
   bool containing_current_rank() const { return containing_current_rank_; }
   DeviceType device_type() const { return device_type_; }
   const std::string& device_tag() const { return parallel_conf_.device_tag(); }
@@ -78,6 +73,8 @@ class ParallelDesc final {
   int64_t device_num_of_each_machine() const { return device_num_of_each_machine_; }
   const ParallelConf& parallel_conf() const { return parallel_conf_; }
 
+  const ParallelConf& data() const { return parallel_conf_; }
+
   Maybe<void> GetParallelContext(ParallelContext* parallel_ctx, int64_t machine_id,
                                  int64_t device_id) const;
   std::shared_ptr<Shape> hierarchy() const { return hierarchy_; }
@@ -94,6 +91,8 @@ class ParallelDesc final {
   bool operator==(const ParallelDesc& rhs) const { return Equals(rhs); }
   bool operator!=(const ParallelDesc& rhs) const { return !(*this == rhs); }
   bool Equals(const ParallelDesc* rhs) const { return Equals(*rhs); }
+  const std::vector<int64_t>& parallel_id2machine_id() const { return parallel_id2machine_id_; }
+  const std::vector<int64_t>& parallel_id2device_id() const { return parallel_id2device_id_; }
   Maybe<int64_t> MachineId4ParallelId(int64_t parallel_id) const;
   Maybe<int64_t> DeviceId4ParallelId(int64_t parallel_id) const;
   Maybe<int64_t> ParallelId4MachineDeviceId(int64_t machine_id, int64_t device_id) const;
@@ -103,12 +102,14 @@ class ParallelDesc final {
   bool Bigger(const ParallelDesc& rhs) const;
   bool ContainingMachineId(int64_t machine_id) const;
 
-  std::shared_ptr<cfg::ParallelConf> cfg_parallel_conf() const { return cfg_parallel_conf_; }
   bool TryGetParallelId(int64_t machine_id, int64_t device_id, int64_t* parallel_id) const;
+  Maybe<bool> TryGetParallelId(int64_t rank, int64_t* parallel_id) const;
+
+  Maybe<void> CheckDeviceIdsIsValid() const;
 
  private:
   friend Maybe<OFRecord> ParseMachineAndDeviceIdList(const ParallelConf& parallel_conf);
-  ParallelDesc() : symbol_id_(Error::SymbolIdUninitializedError()) {}
+  ParallelDesc() : symbol_id_(NullOpt) {}
   ParallelDesc(int64_t symbol_id) : symbol_id_(symbol_id) {}
   void ClearUp();
   Maybe<void> SetMachineIdAndDeviceIdsByParsingDeviceName(const std::string& device_name,
@@ -117,7 +118,7 @@ class ParallelDesc final {
   Maybe<void> CheckWithResourceDesc(const ResourceDesc& resource_desc);
   bool EqualsMachineId2SortedDevPhyIds(const ParallelDesc& rhs) const;
 
-  Maybe<int64_t> symbol_id_;
+  Optional<int64_t> symbol_id_;
   DeviceType device_type_;
   ParallelConf parallel_conf_;
   std::shared_ptr<Shape> hierarchy_;
@@ -126,12 +127,9 @@ class ParallelDesc final {
       machine_id2sorted_dev_phy_ids_;
   int64_t parallel_num_;
   int64_t device_num_of_each_machine_;
-  HashMap<int64_t, int64_t> parallel_id2machine_id_;
-  HashMap<int64_t, int64_t> parallel_id2device_id_;
+  std::vector<int64_t> parallel_id2machine_id_;
+  std::vector<int64_t> parallel_id2device_id_;
   HashMap<int64_t, HashMap<int64_t, int64_t>> machine_id2device_id2parallel_id_;
-  // TODO(lixinqi): merge cfg_parallel_conf_ and parallel_conf_ after cfg::ParallelConf taken as the
-  // constructor argument
-  std::shared_ptr<cfg::ParallelConf> cfg_parallel_conf_;
   // cached result of ContainingMachineId(GlobalProcessCtx::Rank()) for performace optimization.
   bool containing_current_rank_;
 };
@@ -146,6 +144,10 @@ extern Maybe<const ParallelContext> (*GetParallelContext4CurrentProcessCtx)(
 extern Maybe<Symbol<ParallelDesc>> (*ReplaceDeviceType)(Symbol<ParallelDesc>, DeviceType);
 extern Maybe<std::string> (*PlacementToString)(Symbol<ParallelDesc> placement);
 extern Maybe<Symbol<Device>> (*GetTensorDevice)(Symbol<ParallelDesc> parallel_desc);
+extern Maybe<Symbol<ParallelDesc>> (*TxtStringToPlacement)(const std::string& parallel_conf_str);
+extern Maybe<void> (*CheckDeviceIdsIsValid)(Symbol<ParallelDesc> placement);
+
+extern Maybe<Symbol<ParallelDesc>> (*GetParallelDescOfThisRank)(const std::string& device_tag);
 
 inline bool operator==(const ParallelConf& lhs, const ParallelConf& rhs) {
   return ParallelDesc(lhs) == ParallelDesc(rhs);
@@ -160,14 +162,15 @@ std::tuple<int32_t, int32_t> GetPartIdAndPartNumFromParallelCtx(
 
 ParallelConf GenParallelConfOfCpuZeroOnMaster();
 ParallelConf GenParallelConfOfCpuZeroOnAllMachines();
-
-bool IsMirroredParallelContext(const ParallelContext& parallel_ctx);
+ParallelConf GenParallelConfOfCpuOnAllRanks();
 
 namespace private_details {
 
 Maybe<Symbol<ParallelDesc>> RawReplaceDeviceType(Symbol<ParallelDesc>, DeviceType);
 
 Maybe<std::string> RawPlacementToString(Symbol<ParallelDesc> placement);
+
+Maybe<Symbol<ParallelDesc>> RawTxtStringToPlacement(const std::string& parallel_conf_str);
 
 }  // namespace private_details
 }  // namespace oneflow
@@ -177,16 +180,16 @@ namespace std {
 template<>
 struct hash<oneflow::ParallelDesc> {
   size_t operator()(const oneflow::ParallelDesc& pr) const {
+    using namespace oneflow;
     size_t ret = 0;
     int i = 0;
     int shift_roundtrip = (sizeof(size_t) / 2);
     for (int machine_id : pr.sorted_machine_ids()) {
       int shift = i++ % shift_roundtrip;
-      ret ^= machine_id << shift_roundtrip << shift;
-      ret ^= pr.sorted_dev_phy_ids(machine_id).size() << shift;
+      AddHash(&ret, machine_id << shift_roundtrip << shift);
+      AddHash(&ret, pr.sorted_dev_phy_ids(machine_id).size() << shift);
     }
-    const auto& shape_hash = std::hash<oneflow::Shape>();
-    ret ^= shape_hash(*pr.hierarchy());
+    AddHash(&ret, *pr.hierarchy());
     return hash<size_t>()(ret);
   }
 };

@@ -24,7 +24,9 @@ import oneflow.unittest
 class GPTDataLoader(flow.nn.Module):
     def __init__(
         self,
-        data_file_prefix="/dataset/Megatron-LM/dummy/gpt_sample_dataset_text_document",
+        data_file_prefix=flow.unittest.dataset_dir(
+            "Megatron-LM/dummy/gpt_sample_dataset_text_document"
+        ),
         seq_length=1024,
         num_samples=648,
         batch_size=8,
@@ -74,12 +76,12 @@ class GPTDataLoaderDistributedTestCase(oneflow.unittest.TestCase):
         # )
         eager_gpt_loader = GPTDataLoader(batch_size=4, device=flow.device("cpu", rank))
 
-        consistent_gpt_loader = GPTDataLoader(
+        global_gpt_loader = GPTDataLoader(
             batch_size=8,
-            placement=flow.placement("cpu", {0: [0, 1]}),
+            placement=flow.placement("cpu", ranks=[0, 1]),
             sbp=[flow.sbp.split(0)],
         )
-        gpt_loader_graph = DataLoaderGraph(consistent_gpt_loader)
+        gpt_loader_graph = DataLoaderGraph(global_gpt_loader)
 
         iteration = 2
         for i in range(iteration):

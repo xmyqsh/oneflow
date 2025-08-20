@@ -21,7 +21,6 @@ limitations under the License.
 #include "oneflow/core/job/job.pb.h"
 #include "oneflow/core/job/job_set.pb.h"
 #include "oneflow/core/job/job_build_and_infer_ctx.h"
-#include "oneflow/core/job/lbi_diff_watcher_info.pb.h"
 
 namespace oneflow {
 
@@ -37,6 +36,8 @@ class JobBuildAndInferCtxMgr {
 
   const JobSet& job_set() const { return job_set_; }
   std::string structure_graph() const;
+  void TryUpdateJobIdCount(int64_t id_count);
+  int64_t GetJobIdCount() const;
 
  protected:
   virtual JobBuildAndInferCtx* NewJobBuildAndInferCtx(Job* job, int64_t job_id) const = 0;
@@ -48,6 +49,7 @@ class JobBuildAndInferCtxMgr {
 
  private:
   JobSet job_set_;
+  int64_t job_id_count_{0};
   bool has_cur_job_;
   std::string cur_job_name_;
   HashMap<std::string, std::unique_ptr<JobBuildAndInferCtx>> job_name2infer_ctx_;
@@ -60,26 +62,11 @@ class LazyJobBuildAndInferCtxMgr : public JobBuildAndInferCtxMgr {
   ~LazyJobBuildAndInferCtxMgr() override = default;
 
  private:
-  friend class Global<LazyJobBuildAndInferCtxMgr>;
+  friend class Singleton<LazyJobBuildAndInferCtxMgr>;
 
   Maybe<void> VirtualCloseJob() override;
   JobBuildAndInferCtx* NewJobBuildAndInferCtx(Job* job, int64_t job_id) const override;
 };
-
-class EagerJobBuildAndInferCtxMgr : public JobBuildAndInferCtxMgr {
- public:
-  OF_DISALLOW_COPY_AND_MOVE(EagerJobBuildAndInferCtxMgr);
-  EagerJobBuildAndInferCtxMgr() : JobBuildAndInferCtxMgr() {}
-  ~EagerJobBuildAndInferCtxMgr() override = default;
-
- private:
-  friend class Global<EagerJobBuildAndInferCtxMgr>;
-
-  Maybe<void> VirtualCloseJob() override;
-  JobBuildAndInferCtx* NewJobBuildAndInferCtx(Job* job, int64_t job_id) const override;
-};
-
-bool EagerExecutionEnabled();
 
 Maybe<JobBuildAndInferCtxMgr*> GlobalJobBuildAndInferCtxMgr();
 Maybe<JobBuildAndInferCtx*> GetJobBuildAndInferCtx(const std::string& job_name);

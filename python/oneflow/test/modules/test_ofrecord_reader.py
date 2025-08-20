@@ -28,7 +28,7 @@ class OFRecordDataLoader(flow.nn.Module):
         shuffle = False
 
         self.ofrecord_reader = flow.nn.OFRecordReader(
-            "/dataset/imagenet_227/train/32",
+            flow.unittest.dataset_dir("imagenet_227/train/32"),
             batch_size=batch_size,
             data_part_num=2,
             random_shuffle=shuffle,
@@ -66,6 +66,7 @@ class DataLoaderGraph(flow.nn.Graph):
 
 
 @unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
+@unittest.skipUnless(os.path.exists(flow.unittest.dataset_dir("imagenet_227")), "")
 @flow.unittest.skip_unless_1n2d()
 class DistributedOFRecordReaderTestCase(oneflow.unittest.TestCase):
     def test(test_case):
@@ -76,12 +77,12 @@ class DistributedOFRecordReaderTestCase(oneflow.unittest.TestCase):
             batch_size=2, device=flow.device("cpu", rank)
         )
 
-        lazy_consistent_loader = OFRecordDataLoader(
+        lazy_global_loader = OFRecordDataLoader(
             batch_size=4,
-            placement=flow.placement("cpu", {0: [0, 1]}),
+            placement=flow.placement("cpu", ranks=[0, 1]),
             sbp=[flow.sbp.split(0)],
         )
-        loader_graph = DataLoaderGraph(lazy_consistent_loader)
+        loader_graph = DataLoaderGraph(lazy_global_loader)
 
         iteration = 2
         for i in range(iteration):

@@ -18,43 +18,64 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.nn as nn
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
-def _test_triu(test_case, diagonal, device):
+def _test_triu(test_case, diagonal, device, dtype):
     arr_shape = (4, 4, 8)
-    np_arr = np.random.randn(*arr_shape)
-    input_tensor = flow.Tensor(
-        np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
+    flow_dtype, np_dtype = dtype
+    np_arr = np.random.randn(*arr_shape).astype(np_dtype)
+    input_tensor = flow.tensor(
+        np_arr, dtype=flow_dtype, device=flow.device(device), requires_grad=True
     )
     output = flow.triu(input_tensor, diagonal=diagonal)
     np_out = np.triu(np_arr, diagonal)
     test_case.assertTrue(np.allclose(output.numpy(), np_out, 1e-06, 1e-06))
     output = output.sum()
     output.backward()
-    np_grad = np.triu(np.ones(shape=arr_shape, dtype=np.float32), diagonal)
+    np_grad = np.triu(np.ones(shape=arr_shape, dtype=np_dtype), diagonal)
     test_case.assertTrue(np.allclose(input_tensor.grad.numpy(), np_grad, 1e-06, 1e-06))
+
+
+def _test_triu_(test_case, diagonal, device, dtype):
+    arr_shape = (4, 4, 8)
+    flow_dtype, np_dtype = dtype
+    np_arr = np.random.randn(*arr_shape).astype(np_dtype)
+    input = flow.tensor(np_arr, dtype=flow_dtype, device=flow.device(device))
+    np_out = np.triu(np_arr, diagonal)
+    test_case.assertFalse(np.allclose(input.numpy(), np_out))
+    input.triu_(diagonal=diagonal)
+    test_case.assertTrue(np.allclose(input.numpy(), np_out))
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestTriu(flow.unittest.TestCase):
     def test_triu(test_case):
         arg_dict = OrderedDict()
-        arg_dict["test_fun"] = [_test_triu]
+        arg_dict["test_fun"] = [_test_triu, _test_triu_]
         arg_dict["diagonal"] = [2, -1]
         arg_dict["device"] = ["cuda", "cpu"]
+        arg_dict["dtype"] = [(flow.float32, np.float32), (flow.float16, np.float16)]
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest(auto_backward=False)
-    def test_triu_with_0shape_data(test_case):
+    @autotest()
+    def test_triu_with_0_size_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(4, 2, 1, 0, 3).to(device)
+        x = random_tensor(4, 2, 1, 0, 3).to(device)
+        y = torch.triu(x)
+        return y
+
+    @autotest()
+    def test_triu_with_0_size_data_fp16(test_case):
+        device = random_device()
+        x = random_tensor(4, 2, 1, 0, 3).to(device, torch.float16)
         y = torch.triu(x)
         return y
 

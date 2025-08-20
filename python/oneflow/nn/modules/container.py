@@ -13,31 +13,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import collections.abc
-import warnings
-import operator
-from collections import OrderedDict, abc as container_abcs
-from itertools import islice
-from typing import (
-    Any,
-    Iterable,
-    Iterator,
-    Mapping,
-    Optional,
-    Tuple,
-    TypeVar,
-    Union,
-    overload,
-)
-
-import oneflow as flow
-from oneflow.nn.module import Module
-
-T = TypeVar("T")
+from oneflow.nn.utils.container import *
+from oneflow.nn.modules.module import Module
 
 
-class Sequential(Module):
+class Sequential(get_seq(Module)):
     """A sequential container.
+
+    The interface is consistent with PyTorch.    
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.Sequential.html?#torch.nn.Sequential.
+    
     Modules will be added to it in the order they are passed in the constructor.
     Alternatively, an ordered dict of modules can also be passed in.
 
@@ -46,6 +31,7 @@ class Sequential(Module):
     .. code-block:: python
 
         >>> import oneflow.nn as nn
+        >>> from collections import OrderedDict
         >>> nn.Sequential(nn.Conv2d(1,20,5), nn.ReLU(), nn.Conv2d(20,64,5), nn.ReLU()) #doctest: +ELLIPSIS
         Sequential(
           (0): Conv2d(1, 20, kernel_size=(5, 5), stride=(1, 1))
@@ -68,478 +54,217 @@ class Sequential(Module):
 
     """
 
-    @overload
-    def __init__(self, *args: Module) -> None:
-        ...
-
-    @overload
-    def __init__(self, arg: "OrderedDict[str, Module]") -> None:
-        ...
-
-    def __init__(self, *args: Any):
-        super(Sequential, self).__init__()
-        if len(args) == 1 and isinstance(args[0], OrderedDict):
-            for (key, module) in args[0].items():
-                self.add_module(key, module)
-        else:
-            for (idx, module) in enumerate(args):
-                self.add_module(str(idx), module)
-
-    def _get_item_by_idx(self, iterator, idx):
-        """Get the idx-th item of the iterator"""
-        size = len(self)
-        idx = operator.index(idx)
-        if not -size <= idx < size:
-            raise IndexError("index {} is out of range".format(idx))
-        idx %= size
-        return next(islice(iterator, idx, None))
-
-    def __getitem__(self: T, idx) -> T:
-        if isinstance(idx, slice):
-            return self.__class__(OrderedDict(list(self._modules.items())[idx]))
-        else:
-            return self._get_item_by_idx(self._modules.values(), idx)
-
-    def __setitem__(self, idx: int, module: Module) -> None:
-        key = self._get_item_by_idx(self._modules.keys(), idx)
-        return setattr(self, key, module)
-
-    def __delitem__(self, idx: Union[slice, int]) -> None:
-        if isinstance(idx, slice):
-            for key in list(self._modules.keys())[idx]:
-                delattr(self, key)
-        else:
-            key = self._get_item_by_idx(self._modules.keys(), idx)
-            delattr(self, key)
-
-    def __len__(self) -> int:
-        return len(self._modules)
-
-    def __dir__(self):
-        keys = super(Sequential, self).__dir__()
-        keys = [key for key in keys if not key.isdigit()]
-        return keys
-
-    def __iter__(self) -> Iterator[Module]:
-        return iter(self._modules.values())
-
-    def forward(self, input):
-        for module in self:
-            input = module(input)
-        return input
-
-
-class ModuleList(Module):
-    def __init__(self, modules: Optional[Iterable[Module]] = None) -> None:
-        super(ModuleList, self).__init__()
-        if modules is not None:
-            self += modules
-
-    def _get_abs_string_index(self, idx):
-        """Get the absolute index for the list of modules"""
-        idx = operator.index(idx)
-        if not -len(self) <= idx < len(self):
-            raise IndexError("index {} is out of range".format(idx))
-        if idx < 0:
-            idx += len(self)
-        return str(idx)
-
-    def __getitem__(self, idx: int) -> Module:
-        if isinstance(idx, slice):
-            return self.__class__(list(self._modules.values())[idx])
-        else:
-            return self._modules[self._get_abs_string_index(idx)]
-
-    def __setitem__(self, idx: int, module: Module) -> None:
-        idx = self._get_abs_string_index(idx)
-        return setattr(self, str(idx), module)
-
-    def __delitem__(self, idx: Union[int, slice]) -> None:
-        if isinstance(idx, slice):
-            for k in range(len(self._modules))[idx]:
-                delattr(self, str(k))
-        else:
-            delattr(self, self._get_abs_string_index(idx))
-        str_indices = [str(i) for i in range(len(self._modules))]
-        self._modules = OrderedDict(list(zip(str_indices, self._modules.values())))
-
-    def __len__(self) -> int:
-        return len(self._modules)
-
-    def __iter__(self) -> Iterator[Module]:
-        return iter(self._modules.values())
-
-    def __iadd__(self: T, modules: Iterable[Module]) -> T:
-        return self.extend(modules)
-
-    def __dir__(self):
-        keys = super(ModuleList, self).__dir__()
-        keys = [key for key in keys if not key.isdigit()]
-        return keys
-
-    def insert(self, index: int, module: Module) -> None:
-        """Insert a given module before a given index in the list.
-
-        Arguments:
-            index (int): index to insert.
-            module (nn.Module): module to insert
-        """
-        for i in range(len(self._modules), index, -1):
-            self._modules[str(i)] = self._modules[str(i - 1)]
-        self._modules[str(index)] = module
-
-    def append(self: T, module: Module) -> T:
-        """Appends a given module to the end of the list.
-
-        Arguments:
-            module (nn.Module): module to append
-        """
-        self.add_module(str(len(self)), module)
-        return self
-
-    def extend(self: T, modules: Iterable[Module]) -> T:
-        """Appends modules from a Python iterable to the end of the list.
-
-        Arguments:
-            modules (iterable): iterable of modules to append
-        """
-        if not isinstance(modules, collections.abc.Iterable):
-            raise TypeError(
-                "ModuleList.extend should be called with an iterable, but got "
-                + type(modules).__name__
-            )
-        offset = len(self)
-        for (i, module) in enumerate(modules):
-            self.add_module(str(offset + i), module)
-        return self
-
-    def forward(self):
-        raise NotImplementedError()
-
-
-class ModuleDict(Module):
-    def __init__(self, modules: Optional[Mapping[str, Module]] = None) -> None:
-        super(ModuleDict, self).__init__()
-        if modules is not None:
-            self.update(modules)
-
-    def __getitem__(self, key: str) -> Module:
-        return self._modules[key]
-
-    def __setitem__(self, key: str, module: Module) -> None:
-        self.add_module(key, module)
-
-    def __delitem__(self, key: str) -> None:
-        del self._modules[key]
-
-    def __len__(self) -> int:
-        return len(self._modules)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._modules)
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._modules
-
-    def clear(self) -> None:
-        """Remove all items from the ModuleDict.
-        """
-        self._modules.clear()
-
-    def pop(self, key: str) -> Module:
-        """Remove key from the ModuleDict and return its module.
-
-        Arguments:
-            key (string): key to pop from the ModuleDict
-        """
-        v = self[key]
-        del self[key]
-        return v
-
-    def keys(self) -> Iterable[str]:
-        """Return an iterable of the ModuleDict keys.
-        """
-        return self._modules.keys()
-
-    def items(self) -> Iterable[Tuple[str, Module]]:
-        """Return an iterable of the ModuleDict key/value pairs.
-        """
-        return self._modules.items()
-
-    def values(self) -> Iterable[Module]:
-        """Return an iterable of the ModuleDict values.
-        """
-        return self._modules.values()
-
-    def update(self, modules: Mapping[str, Module]) -> None:
-        if not isinstance(modules, collections.abc.Iterable):
-            raise TypeError(
-                "ModuleDict.update should be called with an iterable of key/value pairs, but got "
-                + type(modules).__name__
-            )
-        if isinstance(modules, (OrderedDict, ModuleDict, collections.abc.Mapping)):
-            for (key, module) in modules.items():
-                self[key] = module
-        else:
-            for (j, m) in enumerate(modules):
-                if not isinstance(m, collections.abc.Iterable):
-                    raise TypeError(
-                        "ModuleDict update sequence element #"
-                        + str(j)
-                        + " should be Iterable; is"
-                        + type(m).__name__
-                    )
-                if not len(m) == 2:
-                    raise ValueError(
-                        "ModuleDict update sequence element #"
-                        + str(j)
-                        + " has length "
-                        + str(len(m))
-                        + "; 2 is required"
-                    )
-                self[m[0]] = m[1]
-
-
-class ParameterList(Module):
-    def __init__(self, parameters: Optional[Iterable["Parameter"]] = None) -> None:
-        super(ParameterList, self).__init__()
-        self._initialized = True
-        if parameters is not None:
-            self += parameters
-
-    def __setstate__(self, state):
-        state["_initialized"] = False
-        super(ParameterList, self).__setstate__(state)
-        self._initialized = True
-
-    def _get_abs_string_index(self, idx):
-        """Get the absolute index for the list of modules"""
-        idx = operator.index(idx)
-        if not -len(self) <= idx < len(self):
-            raise IndexError("index {} is out of range".format(idx))
-        if idx < 0:
-            idx += len(self)
-        return str(idx)
-
-    @overload
-    def __getitem__(self, idx: int) -> "Parameter":
-        ...
-
-    @overload
-    def __getitem__(self: T, idx: slice) -> T:
-        ...
-
-    def __getitem__(self, idx):
-        if isinstance(idx, slice):
-            return self.__class__(list(self._parameters.values())[idx])
-        else:
-            idx = self._get_abs_string_index(idx)
-            return self._parameters[str(idx)]
-
-    def __setitem__(self, idx: int, param: "Parameter") -> None:
-        idx = self._get_abs_string_index(idx)
-        return self.register_parameter(str(idx), param)
-
-    def __setattr__(self, key: Any, value: Any) -> None:
-        if getattr(self, "_initialized", False):
-            if not hasattr(self, key) and (not isinstance(value, flow.nn.Parameter)):
-                warnings.warn("Setting attributes on ParameterList is not supported.")
-        super(ParameterList, self).__setattr__(key, value)
-
-    def __len__(self) -> int:
-        return len(self._parameters)
-
-    def __iter__(self) -> Iterator["Parameter"]:
-        return iter(self._parameters.values())
-
-    def __iadd__(self: T, parameters: Iterable["Parameter"]) -> T:
-        return self.extend(parameters)
-
-    def __dir__(self):
-        keys = super(ParameterList, self).__dir__()
-        keys = [key for key in keys if not key.isdigit()]
-        return keys
-
-    def append(self: T, parameter: "Parameter") -> T:
-        """Appends a given parameter at the end of the list.
-
-        Arguments:
-
-            parameter (nn.Parameter): parameter to append
-        """
-        self.register_parameter(str(len(self)), parameter)
-        return self
-
-    def extend(self: T, parameters: Iterable["Parameter"]) -> T:
-        """Appends parameters from a Python iterable to the end of the list.
-
-        Arguments:
-
-            parameters (iterable): iterable of parameters to append
-        """
-        if not isinstance(parameters, collections.abc.Iterable):
-            raise TypeError(
-                "ParameterList.extend should be called with an iterable, but got "
-                + type(parameters).__name__
-            )
-        offset = len(self)
-        for (i, param) in enumerate(parameters):
-            self.register_parameter(str(offset + i), param)
-        return self
-
-    def extra_repr(self) -> str:
-        child_lines = []
-        for (k, p) in self._parameters.items():
-            size_str = "x".join((str(size) for size in p.size()))
-            device_str = "" if not p.is_cuda else " (GPU {})".format(p.get_device())
-            parastr = "Parameter containing: [{} of size {}{}]".format(
-                type(p), size_str, device_str
-            )
-            child_lines.append("  (" + str(k) + "): " + parastr)
-        tmpstr = "\n".join(child_lines)
-        return tmpstr
-
-    def __call__(self, input):
-        raise RuntimeError("ParameterList should not be called.")
-
-    def _replicate_for_data_parallel(self):
-        warnings.warn(
-            "nn.ParameterList is being used with DataParallel but this is not supported. This list will appear empty for the models replicated on each GPU except the original one."
+    pass
+
+
+class ModuleList(get_list(Module)):
+    """Holds submodules in a list.
+
+    The interface is consistent with PyTorch.    
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.ModuleList.html?#torch.nn.ModuleList.
+    
+    :class:`~oneflow.nn.ModuleList` can be indexed like a regular Python list, but
+    modules it contains are properly registered, and will be visible by all
+    :class:`~oneflow.nn.Module` methods.
+    
+    Args:
+        modules (iterable, optional): an iterable of modules to add
+    
+    .. code-block:: python
+
+        >>> import oneflow.nn as nn
+
+        >>> class MyModule(nn.Module):
+        ...    def __init__(self):
+        ...        super(MyModule, self).__init__()
+        ...        self.linears = nn.ModuleList([nn.Linear(10, 10) for i in range(10)])
+        ...    def forward(self, x):
+        ...        # ModuleList can act as an iterable, or be indexed using ints
+        ...        for i, l in enumerate(self.linears):
+        ...            x = self.linears[i // 2](x) + l(x)
+        ...        return x
+
+        >>> model = MyModule()
+        >>> model.linears
+        ModuleList(
+          (0): Linear(in_features=10, out_features=10, bias=True)
+          (1): Linear(in_features=10, out_features=10, bias=True)
+          (2): Linear(in_features=10, out_features=10, bias=True)
+          (3): Linear(in_features=10, out_features=10, bias=True)
+          (4): Linear(in_features=10, out_features=10, bias=True)
+          (5): Linear(in_features=10, out_features=10, bias=True)
+          (6): Linear(in_features=10, out_features=10, bias=True)
+          (7): Linear(in_features=10, out_features=10, bias=True)
+          (8): Linear(in_features=10, out_features=10, bias=True)
+          (9): Linear(in_features=10, out_features=10, bias=True)
         )
-        return super(ParameterList, self)._replicate_for_data_parallel()
+        
+
+    """
+
+    pass
 
 
-class ParameterDict(Module):
-    def __init__(self, parameters: Optional[Mapping[str, "Parameter"]] = None) -> None:
-        super(ParameterDict, self).__init__()
-        self._initialized = True
-        if parameters is not None:
-            self.update(parameters)
+class ModuleDict(get_dict(Module)):
+    """Holds submodules in a dictionary.
 
-    def __setstate__(self, state):
-        state["_initialized"] = False
-        super(ParameterDict, self).__setstate__(state)
-        self._initialized = True
+    The interface is consistent with PyTorch.    
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.ModuleDict.html?#torch.nn.ModuleDict.
 
-    def __getitem__(self, key: str) -> "Parameter":
-        return self._parameters[key]
+    :class:`~oneflow.nn.ModuleDict` can be indexed like a regular Python dictionary,
+    but modules it contains are properly registered, and will be visible by all
+    :class:`~oneflow.nn.Module` methods.
 
-    def __setitem__(self, key: str, parameter: "Parameter") -> None:
-        self.register_parameter(key, parameter)
+    :class:`~oneflow.nn.ModuleDict` is an **ordered** dictionary that respects
 
-    def __delitem__(self, key: str) -> None:
-        del self._parameters[key]
+    * the order of insertion, and
 
-    def __setattr__(self, key: Any, value: Any) -> None:
-        if getattr(self, "_initialized", False):
-            if not hasattr(self, key) and (not isinstance(value, flow.nn.Parameter)):
-                warnings.warn("Setting attributes on ParameterDict is not supported.")
-        super(ParameterDict, self).__setattr__(key, value)
+    * in :meth:`~oneflow.nn.ModuleDict.update`, the order of the merged
+      ``OrderedDict``, ``dict`` (started from Python 3.6) or another
+      :class:`~oneflow.nn.ModuleDict` (the argument to
+      :meth:`~oneflow.nn.ModuleDict.update`).
 
-    def __len__(self) -> int:
-        return len(self._parameters)
+    Note that :meth:`~oneflow.nn.ModuleDict.update` with other unordered mapping
+    types (e.g., Python's plain ``dict`` before Python version 3.6) does not
+    preserve the order of the merged mapping.
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._parameters.keys())
+    Args:
+        modules (iterable, optional): a mapping (dictionary) of (string: module)
+            or an iterable of key-value pairs of type (string, module)
 
-    def __contains__(self, key: str) -> bool:
-        return key in self._parameters
+    .. code-block:: python
 
-    def clear(self) -> None:
-        """Remove all items from the ParameterDict.
-        """
-        self._parameters.clear()
+        >>> import oneflow.nn as nn
 
-    def pop(self, key: str) -> "Parameter":
-        r"""Remove key from the ParameterDict and return its parameter.
+        >>> class MyModule(nn.Module):
+        ...    def __init__(self):
+        ...        super(MyModule, self).__init__()
+        ...        self.choices = nn.ModuleDict({
+        ...                'conv': nn.Conv2d(10, 10, 3),
+        ...                'pool': nn.MaxPool2d(3)
+        ...        })
+        ...        self.activations = nn.ModuleDict([
+        ...                ['lrelu', nn.LeakyReLU()],
+        ...                ['prelu', nn.PReLU()]
+        ...        ])
 
-        Args:
-
-            key (string): key to pop from the ParameterDict
-        """
-        v = self[key]
-        del self[key]
-        return v
-
-    def keys(self) -> Iterable[str]:
-        r"""Return an iterable of the ParameterDict keys.
-        """
-        return self._parameters.keys()
-
-    def items(self) -> Iterable[Tuple[str, "Parameter"]]:
-        r"""Return an iterable of the ParameterDict key/value pairs.
-        """
-        return self._parameters.items()
-
-    def values(self) -> Iterable["Parameter"]:
-        r"""Return an iterable of the ParameterDict values.
-        """
-        return self._parameters.values()
-
-    def update(self, parameters: Mapping[str, "Parameter"]) -> None:
-        r"""Update the :class:`~flow.nn.ParameterDict` with the key-value pairs from a
-        mapping or an iterable, overwriting existing keys.
-
-        .. note::
-            If :attr:`parameters` is an ``OrderedDict``, a :class:`~flow.nn.ParameterDict`, or
-            an iterable of key-value pairs, the order of new elements in it is preserved.
-     
-        Args:
-            parameters (iterable): a mapping (dictionary) from string to
-                :class:`~flow.nn.Parameter`, or an iterable of
-                key-value pairs of type (string, :class:`~flow.nn.Parameter`)
-
-        """
-        if not isinstance(parameters, container_abcs.Iterable):
-            raise TypeError(
-                "ParametersDict.update should be called with an "
-                "iterable of key/value pairs, but got " + type(parameters).__name__
-            )
-
-        if isinstance(parameters, (OrderedDict, ParameterDict)):
-            for key, parameter in parameters.items():
-                self[key] = parameter
-        elif isinstance(parameters, container_abcs.Mapping):
-            for key, parameter in sorted(parameters.items()):
-                self[key] = parameter
-        else:
-            for j, p in enumerate(parameters):
-                if not isinstance(p, container_abcs.Iterable):
-                    raise TypeError(
-                        "ParameterDict update sequence element "
-                        "#" + str(j) + " should be Iterable; is" + type(p).__name__
-                    )
-                if not len(p) == 2:
-                    raise ValueError(
-                        "ParameterDict update sequence element "
-                        "#" + str(j) + " has length " + str(len(p)) + "; 2 is required"
-                    )
-                # parameters as length-2 list too cumbersome to type, see ModuleDict.update comment
-                self[p[0]] = p[1]  # type: ignore[assignment]
-
-    def extra_repr(self) -> str:
-        child_lines = []
-        for k, p in self._parameters.items():
-            size_str = "x".join(str(size) for size in p.size())
-            device_str = "" if not p.is_cuda else " (GPU {})".format(p.get_device())
-            parastr = "Parameter containing: [{} of size {}{}]".format(
-                type(p), size_str, device_str
-            )
-            child_lines.append("  (" + k + "): " + parastr)
-        tmpstr = "\n".join(child_lines)
-        return tmpstr
-
-    def __call__(self, input):
-        raise RuntimeError("ParameterDict should not be called.")
-
-    def _replicate_for_data_parallel(self):
-        warnings.warn(
-            "nn.ParameterDict is being used with DataParallel but this is not "
-            "supported. This dict will appear empty for the models replicated "
-            "on each GPU except the original one."
+        ...    def forward(self, x, choice, act):
+        ...        x = self.choices[choice](x)
+        ...        x = self.activations[act](x)
+        ...        return x
+    
+        >>> model = MyModule()
+        >>> model.choices
+        ModuleDict(
+          (conv): Conv2d(10, 10, kernel_size=(3, 3), stride=(1, 1))
+          (pool): MaxPool2d(kernel_size=(3, 3), stride=(3, 3), padding=(0, 0), dilation=(1, 1))
         )
+    """
 
-        return super(ParameterDict, self)._replicate_for_data_parallel()
+    pass
+
+
+class ParameterList(get_para_list(Module)):
+    """Holds parameters in a list.
+
+    :class:`~oneflow.nn.ParameterList` can be indexed like a regular Python
+    list, but parameters it contains are properly registered, and will be
+    visible by all :class:`~oneflow.nn.Module` methods.
+
+    The interface is consistent with PyTorch.    
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.ParameterList.html?#torch.nn.ParameterList.
+
+    Args:
+        parameters (iterable, optional): an iterable of :class:`~oneflow.nn.Parameter` to add
+
+    .. code-block:: python
+
+        >>> import oneflow as flow
+        >>> import oneflow.nn as nn
+
+        >>> class MyModule(nn.Module):
+        ...    def __init__(self):
+        ...        super(MyModule, self).__init__()
+        ...        self.params = nn.ParameterList([nn.Parameter(flow.randn(10, 10)) for i in range(10)])
+        ...
+        ...    def forward(self, x):
+        ...        # ParameterList can act as an iterable, or be indexed using ints
+        ...        for i, p in enumerate(self.params):
+        ...            x = self.params[i // 2].mm(x) + p.mm(x)
+        ...        return x
+
+        >>> model = MyModule()
+        >>> model.params
+        ParameterList(
+            (0): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (1): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (2): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (3): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (4): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (5): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (6): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (7): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (8): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+            (9): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 10x10]
+        )
+    """
+
+    pass
+
+
+class ParameterDict(get_para_dict(Module)):
+    """
+    Holds parameters in a dictionary.
+
+    ParameterDict can be indexed like a regular Python dictionary, but parameters it
+    contains are properly registered, and will be visible by all Module methods.
+
+    :class:`~oneflow.nn.ParameterDict` is an **ordered** dictionary that respects
+
+    * the order of insertion, and
+
+    * in :meth:`~oneflow.nn.ParameterDict.update`, the order of the merged ``OrderedDict``
+      or another :class:`~oneflow.nn.ParameterDict` (the argument to
+      :meth:`~oneflow.nn.ParameterDict.update`).
+
+    Note that :meth:`~oneflow.nn.ParameterDict.update` with other unordered mapping
+    types (e.g., Python's plain ``dict``) does not preserve the order of the
+    merged mapping.
+    
+    The interface is consistent with PyTorch.    
+    The documentation is referenced from: https://pytorch.org/docs/1.10/generated/torch.nn.ParameterDict.html?#torch.nn.ParameterDict.
+
+    Args:
+        parameters (iterable, optional): a mapping (dictionary) of
+            (string : :class:`~oneflow.nn.Parameter`) or an iterable of key-value pairs
+            of type (string, :class:`~oneflow.nn.Parameter`)
+
+    .. code-block:: python
+        
+        >>> import oneflow as flow
+        >>> import oneflow.nn as nn
+
+        >>> class MyModule(nn.Module):
+        ...    def __init__(self):
+        ...        super(MyModule, self).__init__()
+        ...        self.params = nn.ParameterDict({
+        ...                'left': nn.Parameter(flow.randn(5, 10)),
+        ...                'right': nn.Parameter(flow.randn(5, 10))
+        ...        })
+        ...
+        ...    def forward(self, x, choice):
+        ...        x = self.params[choice].mm(x)
+        ...        return x
+
+        >>> model = MyModule()
+        >>> model.params
+        ParameterDict(
+            (left): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 5x10]
+            (right): Parameter containing: [<class 'oneflow.nn.Parameter'> of size 5x10]
+        )
+    """
+
+    pass
 
 
 if __name__ == "__main__":

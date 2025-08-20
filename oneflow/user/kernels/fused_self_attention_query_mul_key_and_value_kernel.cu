@@ -16,6 +16,8 @@ limitations under the License.
 #include "oneflow/core/framework/framework.h"
 #include "oneflow/user/kernels/slice_util.h"
 #include "oneflow/core/kernel/new_kernel_util.h"
+#include "oneflow/core/ep/include/primitive/permute.h"
+#include "oneflow/core/ep/cuda/cuda_stream.h"
 
 namespace oneflow {
 
@@ -56,33 +58,30 @@ struct CudaDataTypeTrait<half> {
 };
 
 template<typename T>
-void CublasBatchGemm(cublasHandle_t handle, char transa, char transb, int64_t m, int64_t n,
+void CublasBatchGemm(ep::CudaStream* stream, char transa, char transb, int64_t m, int64_t n,
                      int64_t k, T alpha, const T* a, int64_t lda, int64_t stridea, const T* b,
                      int64_t ldb, int64_t strideb, T beta, T* c, int64_t ldc, int64_t stridec,
                      int64_t batch_size) {
   cublasOperation_t opa = GetCublasOp(transa);
   cublasOperation_t opb = GetCublasOp(transb);
-  if (CUDA_VERSION >= 9010 && GetCudaSmVersion() >= 500) {
+  if (CUDA_VERSION >= 9010 && stream->cuda_arch() >= 500) {
 #if CUDA_VERSION >= 9010
     cudaDataType_t data_type = CudaDataTypeTrait<T>::value;
     OF_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
-        handle, opa, opb, m, n, k, reinterpret_cast<const void*>(&alpha),
+        stream->cublas_handle(), opa, opb, m, n, k, reinterpret_cast<const void*>(&alpha),
         reinterpret_cast<const void*>(a), data_type, lda, stridea, reinterpret_cast<const void*>(b),
         data_type, ldb, strideb, reinterpret_cast<const void*>(&beta), reinterpret_cast<void*>(c),
         data_type, ldc, stridec, batch_size, data_type, CUBLAS_GEMM_DEFAULT));
 #else
     UNIMPLEMENTED();
 #endif
-  } else {
-    cublas_gemmStridedBatched<T>(handle, opa, opb, m, n, k, &alpha, a, ldb, stridea, b, ldb,
-                                 strideb, &beta, c, ldc, stridec, batch_size);
   }
 }
 
 #if CUDA_VERSION >= 9010
 
 template<>
-void CublasBatchGemm<half>(cublasHandle_t handle, char transa, char transb, int64_t m, int64_t n,
+void CublasBatchGemm<half>(ep::CudaStream* stream, char transa, char transb, int64_t m, int64_t n,
                            int64_t k, half alpha, const half* a, int64_t lda, int64_t stridea,
                            const half* b, int64_t ldb, int64_t strideb, half beta, half* c,
                            int64_t ldc, int64_t stridec, int64_t batch_size) {
@@ -90,7 +89,7 @@ void CublasBatchGemm<half>(cublasHandle_t handle, char transa, char transb, int6
   cublasOperation_t opa = GetCublasOp(transa);
   cublasOperation_t opb = GetCublasOp(transb);
 
-  if (GetCudaSmVersion() >= 500) {
+  if (stream->cuda_arch() >= 500) {
     float alpha_f = static_cast<comp_t>(alpha);
     float beta_f = static_cast<comp_t>(beta);
 #if CUDA_VERSION >= 11000
@@ -101,22 +100,19 @@ void CublasBatchGemm<half>(cublasHandle_t handle, char transa, char transb, int6
     cudaDataType_t data_type = CudaDataTypeTrait<half>::value;
     cudaDataType_t comp_type = CudaDataTypeTrait<comp_t>::value;
     OF_CUBLAS_CHECK(cublasGemmStridedBatchedEx(
-        handle, opa, opb, m, n, k, &alpha_f, reinterpret_cast<const void*>(a), data_type, lda,
-        stridea, reinterpret_cast<const void*>(b), data_type, ldb, strideb, &beta_f,
+        stream->cublas_handle(), opa, opb, m, n, k, &alpha_f, reinterpret_cast<const void*>(a),
+        data_type, lda, stridea, reinterpret_cast<const void*>(b), data_type, ldb, strideb, &beta_f,
         reinterpret_cast<void*>(c), data_type, ldc, stridec, batch_size, comp_type, algo));
-  } else {
-    cublas_gemmStridedBatched<half>(handle, opa, opb, m, n, k, &alpha, a, lda, stridea, b, ldb,
-                                    strideb, &beta, c, ldc, stridec, batch_size);
   }
 }
 
 template<>
-void CublasBatchGemm<float16>(cublasHandle_t handle, char transa, char transb, int64_t m, int64_t n,
-                              int64_t k, float16 alpha, const float16* a, int64_t lda,
+void CublasBatchGemm<float16>(ep::CudaStream* stream, char transa, char transb, int64_t m,
+                              int64_t n, int64_t k, float16 alpha, const float16* a, int64_t lda,
                               int64_t stridea, const float16* b, int64_t ldb, int64_t strideb,
                               float16 beta, float16* c, int64_t ldc, int64_t stridec,
                               int64_t batch_size) {
-  CublasBatchGemm<half>(handle, transa, transb, m, n, k, static_cast<half>(alpha),
+  CublasBatchGemm<half>(stream, transa, transb, m, n, k, static_cast<half>(alpha),
                         reinterpret_cast<const half*>(a), lda, stridea,
                         reinterpret_cast<const half*>(b), ldb, strideb, static_cast<half>(beta),
                         reinterpret_cast<half*>(c), ldc, stridec, batch_size);
@@ -125,11 +121,12 @@ void CublasBatchGemm<float16>(cublasHandle_t handle, char transa, char transb, i
 #endif  // CUDA_VERSION >= 9010
 
 template<typename T>
-void BatchedGemm(DeviceCtx* ctx, char opa, char opb, int64_t m, int64_t n, int64_t k, float alpha,
-                 const T* a, int64_t lda, int64_t stridea, const T* b, int64_t ldb, int64_t strideb,
-                 float beta, T* c, int64_t ldc, int64_t stridec, int64_t batch_size) {
+void BatchedGemm(ep::Stream* stream, char opa, char opb, int64_t m, int64_t n, int64_t k,
+                 float alpha, const T* a, int64_t lda, int64_t stridea, const T* b, int64_t ldb,
+                 int64_t strideb, float beta, T* c, int64_t ldc, int64_t stridec,
+                 int64_t batch_size) {
   // swap m and n, a and b to convert from row-major to col-major
-  CublasBatchGemm<T>(ctx->cublas_pmh_handle(), opb, opa, n, m, k, static_cast<T>(alpha), b, ldb,
+  CublasBatchGemm<T>(stream->As<ep::CudaStream>(), opb, opa, n, m, k, static_cast<T>(alpha), b, ldb,
                      strideb, a, lda, stridea, static_cast<T>(beta), c, ldc, stridec, batch_size);
 }
 
@@ -137,7 +134,6 @@ SliceParams ConstructSliceParams4Value(int64_t seq_len, int64_t batch_size, int6
                                        int64_t head_size) {
   // slice (s, b, n, 3, h) to (s, b, n, 1, h)
   SliceParams params;
-  std::memset(&params, 0, sizeof(SliceParams));
   params.ndim = 4;
   params.dims[0] = seq_len;
   params.dims[1] = batch_size;
@@ -159,15 +155,17 @@ SliceParams ConstructSliceParams4Value(int64_t seq_len, int64_t batch_size, int6
 }
 
 template<typename T>
-void TransposeGpu(DeviceCtx* ctx, const ShapeView& in_shape, const ShapeView& out_shape,
-                  const std::vector<int32_t>& perm, const T* in, T* out) {
+void TransposeGpu(ep::Stream* stream, DataType data_type, const ShapeView& in_shape,
+                  const ShapeView& out_shape, const std::vector<int32_t>& perm, const T* in,
+                  T* out) {
   CHECK_EQ(in_shape.NumAxes(), out_shape.NumAxes());
   int32_t num_axes = in_shape.NumAxes();
   CHECK_EQ(num_axes, perm.size());
   for (int i = 0; i < perm.size(); ++i) { CHECK_EQ(in_shape.At(perm[i]), out_shape.At(i)); }
-  int64_t elem_cnt = in_shape.elem_cnt();
-  NewKernelUtil<DeviceType::kGPU>::Transpose(ctx, num_axes, in_shape, out_shape, perm, elem_cnt, in,
-                                             out);
+  auto transpose = ep::primitive::NewPrimitive<ep::primitive::PermuteFactory>(stream->device_type(),
+                                                                              in_shape.NumAxes());
+  CHECK(transpose);
+  transpose->Launch(stream, data_type, in_shape.NumAxes(), in_shape.ptr(), in, perm.data(), out);
 }
 
 template<typename T>
@@ -180,9 +178,9 @@ class FusedSelfAttentionQueryMulKeyAndValueGpuKernel final : public user_op::OpK
   using user_op::OpKernel::Compute;
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* h_tensor = ctx->Tensor4ArgNameAndIndex("hidden_states", 0);
-    int64_t seq_len = h_tensor->shape().At(0);
-    int64_t batch_size = h_tensor->shape().At(1);
-    int64_t hidden_size = h_tensor->shape().At(2);
+    int64_t seq_len = h_tensor->shape_view().At(0);
+    int64_t batch_size = h_tensor->shape_view().At(1);
+    int64_t hidden_size = h_tensor->shape_view().At(2);
     int64_t head_size = ctx->Attr<int64_t>("head_size");
     int64_t num_heads = hidden_size / (3 * head_size);
     int64_t ld = batch_size * hidden_size;
@@ -195,20 +193,20 @@ class FusedSelfAttentionQueryMulKeyAndValueGpuKernel final : public user_op::OpK
     user_op::Tensor* qmk_tensor = ctx->Tensor4ArgNameAndIndex("query_mul_key", 0);
     const T* q_dptr = h_tensor->dptr<T>();
     const T* k_dptr = h_tensor->dptr<T>() + k_offset;
-    BatchedGemm<T>(ctx->device_ctx(), 'N', 'T', seq_len, seq_len, head_size, alpha, q_dptr, ld,
-                   stride, k_dptr, ld, stride, 0.0f, qmk_tensor->mut_dptr<T>(), seq_len,
-                   seq_len * seq_len, batch_size * num_heads);
+    BatchedGemm<T>(ctx->stream(), 'N', 'T', seq_len, seq_len, head_size, alpha, q_dptr, ld, stride,
+                   k_dptr, ld, stride, 0.0f, qmk_tensor->mut_dptr<T>(), seq_len, seq_len * seq_len,
+                   batch_size * num_heads);
 
     // slice v
     user_op::Tensor* tmp_v_tensor = ctx->Tensor4ArgNameAndIndex("tmp_buffer", 0);
     user_op::Tensor* v_tensor = ctx->Tensor4ArgNameAndIndex("value", 0);
     SliceParams params = ConstructSliceParams4Value(seq_len, batch_size, num_heads, head_size);
-    SliceKernelUtil<DeviceType::kGPU, T>::Forward(ctx->device_ctx(), params, h_tensor->dptr<T>(),
-                                                  tmp_v_tensor->mut_dptr<T>());
+    SliceKernelUtil<DeviceType::kCUDA, T>::Forward(ctx->stream(), params, h_tensor->dptr<T>(),
+                                                   tmp_v_tensor->mut_dptr<T>());
     // v from (s, b, n, h) transpose to (b, n, s, h)
     Shape value_shape({seq_len, batch_size, num_heads, head_size});
-    TransposeGpu<T>(ctx->device_ctx(), value_shape, v_tensor->shape(), {1, 2, 0, 3},
-                    tmp_v_tensor->dptr<T>(), v_tensor->mut_dptr<T>());
+    TransposeGpu<T>(ctx->stream(), h_tensor->data_type(), value_shape, v_tensor->shape_view(),
+                    {1, 2, 0, 3}, tmp_v_tensor->dptr<T>(), v_tensor->mut_dptr<T>());
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
@@ -229,37 +227,38 @@ class FusedSelfAttentionQueryMulKeyAndValueGradGpuKernel final : public user_op:
     user_op::Tensor* h_grad_tensor = ctx->Tensor4ArgNameAndIndex("hidden_states_grad", 0);
 
     float alpha = ctx->Attr<float>("alpha");
-    int64_t seq_len = h_grad_tensor->shape().At(0);
-    int64_t batch_size = h_grad_tensor->shape().At(1);
-    int64_t hidden_size = h_grad_tensor->shape().At(2);
-    int64_t num_heads = v_grad_tensor->shape().At(1);
-    int64_t head_size = v_grad_tensor->shape().At(3);
+    int64_t seq_len = h_grad_tensor->shape_view().At(0);
+    int64_t batch_size = h_grad_tensor->shape_view().At(1);
+    int64_t hidden_size = h_grad_tensor->shape_view().At(2);
+    int64_t num_heads = v_grad_tensor->shape_view().At(1);
+    int64_t head_size = v_grad_tensor->shape_view().At(3);
     int64_t ld = batch_size * hidden_size;
     int64_t stride = 3 * head_size;
     CHECK_EQ(hidden_size, num_heads * stride);
 
     // transpose from (b, n, s, h) to (s, b, n, h)
     Shape value_shape({seq_len, batch_size, num_heads, head_size});
-    TransposeGpu<T>(ctx->device_ctx(), v_grad_tensor->shape(), value_shape, {2, 0, 1, 3},
-                    v_grad_tensor->dptr<T>(), tmp_v_tensor->mut_dptr<T>());
+    TransposeGpu<T>(ctx->stream(), v_grad_tensor->data_type(), v_grad_tensor->shape_view(),
+                    value_shape, {2, 0, 1, 3}, v_grad_tensor->dptr<T>(),
+                    tmp_v_tensor->mut_dptr<T>());
     // slice v grad
     SliceParams params = ConstructSliceParams4Value(seq_len, batch_size, num_heads, head_size);
-    SliceKernelUtil<DeviceType::kGPU, T>::Backward(
-        ctx->device_ctx(), params, tmp_v_tensor->dptr<T>(), h_grad_tensor->mut_dptr<T>());
+    SliceKernelUtil<DeviceType::kCUDA, T>::Backward(ctx->stream(), params, tmp_v_tensor->dptr<T>(),
+                                                    h_grad_tensor->mut_dptr<T>());
 
     // grad_q = grad_qmk * k
     // (b, n, sq, sk) x (b, n, sk, h) -> (b, n, s, h) <= (s, b, n, h) <= (s, b, n, 3, h)
     const T* qmk_grad_dptr = qmk_grad_tensor->dptr<T>();
     const T* k_dptr = h_tensor->dptr<T>() + head_size;
     T* grad_q_dptr = h_grad_tensor->mut_dptr<T>();
-    BatchedGemm<T>(ctx->device_ctx(), 'N', 'N', seq_len, head_size, seq_len, alpha, qmk_grad_dptr,
+    BatchedGemm<T>(ctx->stream(), 'N', 'N', seq_len, head_size, seq_len, alpha, qmk_grad_dptr,
                    seq_len, seq_len * seq_len, k_dptr, ld, stride, 0.0f, grad_q_dptr, ld, stride,
                    batch_size * num_heads);
     // grad_k = grad_qmk * q
     // (b, n, sk, sq) x (b, n, sq, h) -> (b, n, sk, h) <= (s, b, n, h) <= (s, b, n, 3, h)
     const T* q_dptr = h_tensor->dptr<T>();
     T* grad_k_dptr = h_grad_tensor->mut_dptr<T>() + head_size;
-    BatchedGemm<T>(ctx->device_ctx(), 'T', 'N', seq_len, head_size, seq_len, alpha, qmk_grad_dptr,
+    BatchedGemm<T>(ctx->stream(), 'T', 'N', seq_len, head_size, seq_len, alpha, qmk_grad_dptr,
                    seq_len, seq_len * seq_len, q_dptr, ld, stride, 0.0f, grad_k_dptr, ld, stride,
                    batch_size * num_heads);
   }
@@ -267,36 +266,36 @@ class FusedSelfAttentionQueryMulKeyAndValueGradGpuKernel final : public user_op:
 };
 
 size_t InferTmpBufferSize(user_op::InferContext* ctx) {
-  const Shape* value_shape = ctx->OutputShape("value", 0);
-  DataType value_dtype = *ctx->OutputDType("value", 0);
-  return value_shape->elem_cnt() * GetSizeOfDataType(value_dtype);
+  const Shape& value_shape = ctx->OutputShape("value", 0);
+  DataType value_dtype = ctx->OutputDType("value", 0);
+  return value_shape.elem_cnt() * GetSizeOfDataType(value_dtype);
 }
 
 size_t InferGradTmpBufferSize(user_op::InferContext* ctx) {
   const Shape& value_shape = ctx->InputShape("value_grad", 0);
-  const DataType& value_dtype = ctx->InputDType("value_grad", 0);
+  DataType value_dtype = ctx->InputDType("value_grad", 0);
   return value_shape.elem_cnt() * GetSizeOfDataType(value_dtype);
 }
 
 }  // namespace
 
-#define REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GPU_KERNEL(dtype)                   \
-  REGISTER_USER_KERNEL("fused_self_attention_query_mul_key_and_value")                            \
-      .SetCreateFn<FusedSelfAttentionQueryMulKeyAndValueGpuKernel<dtype>>()                       \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kGPU)                              \
-                       & (user_op::HobDataType("hidden_states", 0) == GetDataType<dtype>::value)) \
+#define REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_CUDA_KERNEL(dtype)                   \
+  REGISTER_USER_KERNEL("fused_self_attention_query_mul_key_and_value")                             \
+      .SetCreateFn<FusedSelfAttentionQueryMulKeyAndValueGpuKernel<dtype>>()                        \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCUDA)                             \
+                       && (user_op::HobDataType("hidden_states", 0) == GetDataType<dtype>::value)) \
       .SetInferTmpSizeFn(InferTmpBufferSize);
 
-#define REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GRAD_GPU_KERNEL(dtype)              \
-  REGISTER_USER_KERNEL("fused_self_attention_query_mul_key_and_value_grad")                       \
-      .SetCreateFn<FusedSelfAttentionQueryMulKeyAndValueGradGpuKernel<dtype>>()                   \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kGPU)                              \
-                       & (user_op::HobDataType("hidden_states", 0) == GetDataType<dtype>::value)) \
+#define REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GRAD_CUDA_KERNEL(dtype)              \
+  REGISTER_USER_KERNEL("fused_self_attention_query_mul_key_and_value_grad")                        \
+      .SetCreateFn<FusedSelfAttentionQueryMulKeyAndValueGradGpuKernel<dtype>>()                    \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCUDA)                             \
+                       && (user_op::HobDataType("hidden_states", 0) == GetDataType<dtype>::value)) \
       .SetInferTmpSizeFn(InferGradTmpBufferSize);
 
-REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GPU_KERNEL(float)
-REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GPU_KERNEL(float16)
-REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GRAD_GPU_KERNEL(float)
-REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GRAD_GPU_KERNEL(float16)
+REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_CUDA_KERNEL(float)
+REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_CUDA_KERNEL(float16)
+REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GRAD_CUDA_KERNEL(float)
+REGISTER_FUSED_SELF_ATTENTION_QUERY_MUL_KEY_AND_VALUE_GRAD_CUDA_KERNEL(float16)
 
 }  // namespace oneflow

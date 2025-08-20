@@ -15,14 +15,15 @@ limitations under the License.
 """
 from typing import Optional
 
+import oneflow as flow
 from oneflow.framework.tensor import Tensor
-from oneflow.nn.module import Module
+from oneflow.nn.modules.module import Module
 
 
 class PixelShufflev2(Module):
     """
     Part of the documentation is referenced from:
-    https://pytorch.org/docs/stable/generated/torch.nn.PixelShuffle.html#torch.nn.PixelShuffle
+    https://pytorch.org/docs/1.10/generated/torch.nn.PixelShuffle.html.
 
     Rearranges elements in a tensor of shape :math:`(*, C \\times r_h \\times r_w, H, W)`
     to a tensor of shape :math:`(*, C, H \\times r_h, W \\times r_w)`, where r_h and r_w are upscale factors.
@@ -72,13 +73,13 @@ class PixelShufflev2(Module):
         >>> x = flow.Tensor(np.random.randn(3, 4, 5, 5))
         >>> y = m(x)
         >>> y.shape
-        flow.Size([3, 1, 10, 10])
+        oneflow.Size([3, 1, 10, 10])
 
         >>> m = flow.nn.PixelShuffle(h_upscale_factor=3, w_upscale_factor=4)
         >>> x = flow.Tensor(np.random.randn(1, 24, 2, 2))
         >>> y = m(x)
         >>> y.shape
-        flow.Size([1, 2, 6, 8])
+        oneflow.Size([1, 2, 6, 8])
 
     .. _Real-Time Single Image and Video Super-Resolution Using an Efficient Sub-Pixel Convolutional Neural Network:
         https://arxiv.org/abs/1609.05158
@@ -108,35 +109,9 @@ class PixelShufflev2(Module):
         self.w_upscale_factor = w_upscale_factor
 
     def forward(self, input: Tensor) -> Tensor:
-        assert len(input.shape) == 4, "Only Accept 4D Tensor"
-        (_batch, _channel, _height, _width) = input.shape
-        assert (
-            _channel % (self.h_upscale_factor * self.w_upscale_factor) == 0
-        ), "The channels of input tensor must be divisible by (upscale_factor * upscale_factor) or (h_upscale_factor * w_upscale_factor)"
-        _new_c = int(_channel / (self.h_upscale_factor * self.w_upscale_factor))
-        out = input.reshape(
-            _batch,
-            _new_c,
-            self.h_upscale_factor * self.w_upscale_factor,
-            _height,
-            _width,
+        return flow._C.pixel_shuffle(
+            input, self.h_upscale_factor, self.w_upscale_factor
         )
-        out = out.reshape(
-            _batch,
-            _new_c,
-            self.h_upscale_factor,
-            self.w_upscale_factor,
-            _height,
-            _width,
-        )
-        out = out.permute(0, 1, 4, 2, 5, 3)
-        out = out.reshape(
-            _batch,
-            _new_c,
-            _height * self.h_upscale_factor,
-            _width * self.w_upscale_factor,
-        )
-        return out
 
     def extra_repr(self) -> str:
         return f"w_upscale_factor={self.w_upscale_factor}, h_upscale_factor={self.h_upscale_factor}"

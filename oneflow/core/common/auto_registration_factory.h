@@ -68,7 +68,8 @@ struct AutoRegistrationFactory {
   bool has_creators() const { return creators_.get() != nullptr; }
 
   const HashMap<Key, Creator>& creators() const {
-    CHECK(has_creators()) << "Unregistered key type: " << typeid(Key).name();
+    CHECK(has_creators()) << "Unregistered key type: " << typeid(Key).name()
+                          << "Base type name:" << typeid(Base).name();
     return *creators_.get();
   }
 
@@ -92,6 +93,12 @@ struct AutoRegistrationFactory {
 template<typename Key, typename Base, typename... Args>
 inline Base* NewObj(Key k, Args&&... args) {
   return AutoRegistrationFactory<Key, Base, Args...>::Get().New(k, std::forward<Args>(args)...);
+}
+
+template<typename Key, typename Base, typename... Args>
+inline std::unique_ptr<Base> NewObjUniquePtr(Key k, Args&&... args) {
+  return std::unique_ptr<Base>(
+      AutoRegistrationFactory<Key, Base, Args...>::Get().New(k, std::forward<Args>(args)...));
 }
 
 template<typename Key, typename Base, typename... Args>

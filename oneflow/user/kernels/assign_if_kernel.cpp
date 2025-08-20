@@ -33,11 +33,12 @@ class AssignIfCPUKernel final : public user_op::OpKernel {
     const user_op::Tensor* value = ctx->Tensor4ArgNameAndIndex("value", 0);
     user_op::Tensor* ref = ctx->Tensor4ArgNameAndIndex("ref", 0);
     if (value->dptr() == ref->dptr()) { return; }
-    CHECK_EQ(value->shape(), ref->shape());
+    CHECK_EQ(value->shape_view(), ref->shape_view());
     CHECK_EQ(value->data_type(), ref->data_type());
-    const size_t tensor_bytes_size = ref->shape().elem_cnt() * GetSizeOfDataType(ref->data_type());
-    AutoMemcpy(ctx->device_ctx(), ref->mut_dptr(), value->dptr(), tensor_bytes_size,
-               ref->mem_case(), value->mem_case());
+    const size_t tensor_bytes_size =
+        ref->shape_view().elem_cnt() * GetSizeOfDataType(ref->data_type());
+    AutoMemcpy(ctx->stream(), ref->mut_dptr(), value->dptr(), tensor_bytes_size, ref->mem_case(),
+               value->mem_case());
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return true; }
 };
@@ -48,8 +49,8 @@ class AssignIfCPUKernel final : public user_op::OpKernel {
   REGISTER_USER_KERNEL(op_type_name)                                                       \
       .SetCreateFn<AssignIfCPUKernel<assign_if, condition_type>>()                         \
       .SetIsMatchedHob(                                                                    \
-          (user_op::HobDeviceTag() == DeviceType::kCPU)                                    \
-          & (user_op::HobDataType("condition", 0) == GetDataType<condition_type>::value));
+          (user_op::HobDeviceType() == DeviceType::kCPU)                                   \
+          && (user_op::HobDataType("condition", 0) == GetDataType<condition_type>::value));
 
 #define REGISTER_ASSIGN_IF_CPU_KERNEL(condition_cpp_type, condition_data_type)      \
   REGISTER_ASSIGN_WITH_CONDITION_CPU_KERNEL("assign_if", true, condition_cpp_type); \

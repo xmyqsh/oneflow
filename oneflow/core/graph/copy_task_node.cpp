@@ -13,12 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "oneflow/core/framework/to_string.h"
 #include "oneflow/core/graph/copy_task_node.h"
-#include "oneflow/core/operator/operator.h"
-#include "oneflow/core/common/id_util.h"
-#include "oneflow/core/graph/id_serialization.h"
-#include "oneflow/core/device/cpu_stream_index.h"
+#include "oneflow/core/graph/task_stream_id.h"
+#include "oneflow/core/graph/boxing_task_graph.pb.h"
+#include "oneflow/core/framework/user_op_registry_manager.h"
 
 namespace oneflow {
 
@@ -34,66 +32,87 @@ void CopyTaskNode::BuildExecGphAndRegst() {
   auto in_regst = GetSoleConsumedRegst("copy_in");
   out_regst->CopyBlobDescFrom(in_regst.get());
   ExecNode* node = mut_exec_gph().NewNode();
-  node->mut_op() = CHECK_JUST(ConstructOp(NewCopyOpConf()));
+  auto constructed = CHECK_JUST(ConstructOp(NewCopyOpConf()));
+
+  // prevent filling parallel desc for copy commnet
+  if (constructed->op_conf().has_user_conf()) {
+    std::shared_ptr<Shape> hierarchy = std::make_shared<Shape>(Shape({1}));
+    auto parallel_desc =
+        ParallelDesc::New(constructed->op_conf().device_tag(), {"0:0-0"}, hierarchy).GetOrThrow();
+    CHECK_JUST(constructed->FillOpParallelDesc(parallel_desc));
+  }
+
+  node->mut_op() = constructed;
   node->BindBnWithRegst(node->op()->SoleIbn(), in_regst);
   node->BindBnWithRegst(node->op()->SoleObn(), out_regst);
 }
 
 void CopyTaskNode::InferProducedDataRegstTimeShape() { NaiveInferProducedDataRegstTimeShape(); }
 
-void CopyHdTaskNode::Init(CopyHdOpConf::Type copy_type, int64_t machine_id, int64_t dev_phy_id,
+void CopyHdTaskNode::Init(CopyHdType copy_type, const DeviceId& device_id,
                           const LogicalBlobId& lbi) {
   copy_type_ = copy_type;
-  set_machine_id(machine_id);
-  DeviceId device_id{static_cast<DeviceId::rank_t>(machine_id), DeviceType::kGPU,
-                     static_cast<DeviceId::device_index_t>(dev_phy_id)};
-  auto* stream_index_generator =
-      Global<IDMgr>::Get()->GetStreamIndexGeneratorManager()->GetGenerator(device_id);
-  StreamId::stream_index_t stream_index = 0;
-  if (copy_type == CopyHdOpConf::H2D) {
-    stream_index = stream_index_generator->GenerateH2DStreamIndex();
-  } else if (copy_type == CopyHdOpConf::D2H) {
-    stream_index = stream_index_generator->GenerateD2HStreamIndex();
+  set_machine_id(device_id.rank());
+  int64_t thrd_id = -1;
+  if (copy_type == CopyHdType::H2D) {
+    thrd_id = EncodeStreamIdToInt64(GenerateNamedTaskStreamId(device_id, "H2D"));
+  } else if (copy_type == CopyHdType::D2H) {
+    thrd_id = EncodeStreamIdToInt64(GenerateNamedTaskStreamId(device_id, "D2H"));
   } else {
     UNIMPLEMENTED();
   }
-  set_thrd_id(SerializeStreamIdToInt64(StreamId{device_id, stream_index}));
+  set_thrd_id(thrd_id);
   set_lbi(lbi);
 }
 
 void CopyHdTaskNode::InitProducedRegstMemCase(MemoryCase* mem_case) {
-  if (copy_type_ == CopyHdOpConf::H2D) {
+  if (copy_type_ == CopyHdType::H2D) {
     TaskNode::InitProducedRegstMemCase(mem_case);
-  } else if (copy_type_ == CopyHdOpConf::D2H) {
-    mem_case->mutable_host_mem()->mutable_cuda_pinned_mem()->set_device_id(GpuPhyId());
+  } else if (copy_type_ == CopyHdType::D2H) {
+    mem_case->set_device_type(DeviceType::kCPU);
+    mem_case->set_device_id(0);
+    mem_case->set_pinned_device_type(device_type());
+    mem_case->set_pinned_device_id(stream_id().device_id().device_index());
   } else {
     UNIMPLEMENTED();
   }
 }
 
+void CopyHdTaskNode::ProduceAllRegstsAndBindEdges() {
+  const bool enable_mem_reuse = ParseBooleanFromEnv("ONEFLOW_GRAPH_BOXING_ENABLE_MEM_REUSE", false)
+                                && (copy_type_ == CopyHdType::H2D);
+  std::shared_ptr<RegstDesc> out_regst = ProduceRegst("copy_out", enable_mem_reuse);
+  ForEachOutDataEdge([&](TaskEdge* edge) { edge->AddRegst("copy_out", out_regst); });
+}
+
 OperatorConf CopyHdTaskNode::NewCopyOpConf() {
   OperatorConf conf;
-  conf.set_name("copy_hd_" + NewUniqueId());
   conf.set_device_tag(*CHECK_JUST(DeviceTag4DeviceType(device_type())));
-  conf.mutable_copy_hd_conf()->set_type(copy_type_);
+  auto copy_type_name = "undefined";
+  if (copy_type_ == CopyHdType::D2H) {
+    copy_type_name = "copy_d2h";
+  } else if (copy_type_ == CopyHdType::H2D) {
+    copy_type_name = "copy_h2d";
+  } else {
+    LOG(FATAL) << "unknow copy type: " << copy_type_;
+  }
+  conf.set_name(std::string(copy_type_name) + "_" + lbi().op_name() + "-" + lbi().blob_name() + "_"
+                + std::to_string(task_id()));
+  *conf.mutable_user_conf()->mutable_op_type_name() = copy_type_name;
   auto in_regst = GetSoleConsumedRegst("copy_in");
   CHECK_EQ(in_regst->NumOfLbi(), 1);
   in_regst->ForEachLbi([&](const LogicalBlobId& lbi) {
-    *conf.mutable_copy_hd_conf()->mutable_lbi() = lbi;
-    CHECK(lbi == this->lbi());
+    (*conf.mutable_user_conf()->mutable_input())["in"].add_s(GenLogicalBlobName(lbi));
+    (*conf.mutable_user_conf()->mutable_output())["out"].add_s(
+        GenLogicalBlobName(conf.name(), GenRepeatedBn("out", 0)));
   });
   return conf;
 }
 
 void CopyCommNetTaskNode::Init(int64_t machine_id, const LogicalBlobId& lbi) {
   set_machine_id(machine_id);
-  DeviceId device_id{static_cast<DeviceId::rank_t>(machine_id), DeviceType::kCPU,
-                     DeviceId::kCPUDeviceIndex};
-  auto* generator = dynamic_cast<CPUStreamIndexGenerator*>(
-      Global<IDMgr>::Get()->GetStreamIndexGeneratorManager()->GetGenerator(device_id));
-  CHECK_NOTNULL(generator);
-  StreamId stream_id{device_id, generator->GenerateCommNetStreamIndex()};
-  set_thrd_id(SerializeStreamIdToInt64(stream_id));
+  set_thrd_id(EncodeStreamIdToInt64(
+      GenerateNamedTaskStreamId(machine_id, DeviceType::kCPU, 0, "COMM_NET")));
   set_lbi(lbi);
 }
 
@@ -103,6 +122,32 @@ OperatorConf CopyCommNetTaskNode::NewCopyOpConf() {
   conf.set_device_tag(*CHECK_JUST(DeviceTag4DeviceType(this->device_type())));
   *(conf.mutable_copy_comm_net_conf()->mutable_lbi()) = lbi();
   return conf;
+}
+
+Maybe<void> CopyHdTaskNode::InitTransportTaskFromProto(
+    const TransportTaskProto& transport_task_proto, const TaskGraphRebuildCtx& ctx) {
+  CHECK_OR_RETURN(transport_task_proto.has_copy_hd_task())
+      << "not a serialized CopyHdTaskNode. debug string: " << transport_task_proto.DebugString();
+  copy_type_ = transport_task_proto.copy_hd_task().copy_type();
+  return Maybe<void>::Ok();
+}
+
+void CopyHdTaskNode::ToTransportTaskProto(TransportTaskProto* transport_task_proto) const {
+  ToProto(transport_task_proto->mutable_task_proto(), /*check=*/false);
+  transport_task_proto->mutable_copy_hd_task()->set_copy_type(copy_type_);
+}
+
+Maybe<void> CopyCommNetTaskNode::InitTransportTaskFromProto(
+    const TransportTaskProto& transport_task_proto, const TaskGraphRebuildCtx& ctx) {
+  CHECK_OR_RETURN(transport_task_proto.has_copy_comm_net_task())
+      << "not a serialized CopyCommNetTaskNode. debug string: "
+      << transport_task_proto.DebugString();
+  return Maybe<void>::Ok();
+}
+
+void CopyCommNetTaskNode::ToTransportTaskProto(TransportTaskProto* transport_task_proto) const {
+  ToProto(transport_task_proto->mutable_task_proto(), /*check=*/false);
+  transport_task_proto->mutable_copy_comm_net_task();
 }
 
 }  // namespace oneflow

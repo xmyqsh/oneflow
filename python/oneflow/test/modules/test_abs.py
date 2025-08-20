@@ -17,18 +17,30 @@ limitations under the License.
 import unittest
 
 import oneflow as flow
-from automated_test_util import *
+from oneflow.test_utils.automated_test_util import *
 import oneflow.unittest
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestAbsModule(flow.unittest.TestCase):
-    @autotest()
-    def test_abs_with_0shape_data(test_case):
+    @autotest(n=5, check_graph=True)
+    def test_abs_with_0_size_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = torch.abs(x)
         return y
+
+    @autotest(n=5, check_graph=True)
+    def test_abs_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = torch.abs(x)
+        return y
+
+    @profile(torch.abs)
+    def profile_abs(test_case):
+        torch.abs(torch.ones(1, 128, 28, 28))
+        torch.abs(torch.ones(16, 128, 28, 28))
 
 
 if __name__ == "__main__":

@@ -39,9 +39,9 @@ class GridSampleKernel final : public user_op::OpKernel {
     GridSamplerPadding padding = StringToGridGridSamplerPadding(padding_mode);
     const bool align_corners = ctx->Attr<bool>("align_corners");
 
-    const ShapeView& input_shape = input->shape();
-    const ShapeView& grid_shape = grid->shape();
-    const ShapeView& output_shape = output->shape();
+    const ShapeView& input_shape = input->shape_view();
+    const ShapeView& grid_shape = grid->shape_view();
+    const ShapeView& output_shape = output->shape_view();
     int64_t count = output_shape.elem_cnt() / input_shape.At(1);
 
     if (input_shape.NumAxes() == 4) {
@@ -69,17 +69,17 @@ class GridSampleKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_GRID_SAMPLE_KERNEL(device, dtype)         \
-  REGISTER_USER_KERNEL("grid_sample")                      \
-      .SetCreateFn<GridSampleKernel<device, dtype>>()      \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == device) \
-                       & (user_op::HobDataType("input", 0) == GetDataType<dtype>::value))
+#define REGISTER_GRID_SAMPLE_KERNEL(device, dtype)          \
+  REGISTER_USER_KERNEL("grid_sample")                       \
+      .SetCreateFn<GridSampleKernel<device, dtype>>()       \
+      .SetIsMatchedHob((user_op::HobDeviceType() == device) \
+                       && (user_op::HobDataType("input", 0) == GetDataType<dtype>::value))
 
 REGISTER_GRID_SAMPLE_KERNEL(DeviceType::kCPU, float);
 REGISTER_GRID_SAMPLE_KERNEL(DeviceType::kCPU, double);
 #ifdef WITH_CUDA
-REGISTER_GRID_SAMPLE_KERNEL(DeviceType::kGPU, float);
-REGISTER_GRID_SAMPLE_KERNEL(DeviceType::kGPU, double);
+REGISTER_GRID_SAMPLE_KERNEL(DeviceType::kCUDA, float);
+REGISTER_GRID_SAMPLE_KERNEL(DeviceType::kCUDA, double);
 #endif
 
 template<DeviceType device_type, typename data_type>
@@ -101,12 +101,12 @@ class GridSampleGradKernel final : public user_op::OpKernel {
     GridSamplerPadding padding = StringToGridGridSamplerPadding(padding_mode);
     const bool align_corners = ctx->Attr<bool>("align_corners");
 
-    const ShapeView& input_shape = input->shape();
-    const ShapeView& grid_shape = grid->shape();
-    const ShapeView& output_shape = doutput->shape();
+    const ShapeView& input_shape = input->shape_view();
+    const ShapeView& grid_shape = grid->shape_view();
+    const ShapeView& output_shape = doutput->shape_view();
     int64_t count = output_shape.elem_cnt() / input_shape.At(1);
 
-    Memset<device_type>(ctx->device_ctx(), dinput->mut_dptr<data_type>(), 0,
+    Memset<device_type>(ctx->stream(), dinput->mut_dptr<data_type>(), 0,
                         input_shape.elem_cnt() * sizeof(data_type));
 
     if (input_shape.NumAxes() == 4) {
@@ -134,17 +134,17 @@ class GridSampleGradKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_GRID_SAMPLE_GRAD_KERNEL(device, dtype)    \
-  REGISTER_USER_KERNEL("grid_sample_grad")                 \
-      .SetCreateFn<GridSampleGradKernel<device, dtype>>()  \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == device) \
-                       & (user_op::HobDataType("input", 0) == GetDataType<dtype>::value))
+#define REGISTER_GRID_SAMPLE_GRAD_KERNEL(device, dtype)     \
+  REGISTER_USER_KERNEL("grid_sample_grad")                  \
+      .SetCreateFn<GridSampleGradKernel<device, dtype>>()   \
+      .SetIsMatchedHob((user_op::HobDeviceType() == device) \
+                       && (user_op::HobDataType("input", 0) == GetDataType<dtype>::value))
 
 REGISTER_GRID_SAMPLE_GRAD_KERNEL(DeviceType::kCPU, float);
 REGISTER_GRID_SAMPLE_GRAD_KERNEL(DeviceType::kCPU, double);
 #ifdef WITH_CUDA
-REGISTER_GRID_SAMPLE_GRAD_KERNEL(DeviceType::kGPU, float);
-REGISTER_GRID_SAMPLE_GRAD_KERNEL(DeviceType::kGPU, double);
+REGISTER_GRID_SAMPLE_GRAD_KERNEL(DeviceType::kCUDA, float);
+REGISTER_GRID_SAMPLE_GRAD_KERNEL(DeviceType::kCUDA, double);
 #endif
 
 }  // namespace oneflow

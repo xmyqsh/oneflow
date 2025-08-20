@@ -19,21 +19,27 @@ limitations under the License.
 namespace oneflow {
 
 Blob::Blob(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr) {
-  Init(mem_case, blob_desc, header_ptr, header_ptr + blob_desc->AlignedByteSizeOfBlobHeader());
+  Init(mem_case, blob_desc, header_ptr, nullptr, 0);
 }
 
 Blob::Blob(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr,
            char* body_ptr) {
-  Init(mem_case, blob_desc, header_ptr, body_ptr);
+  Init(mem_case, blob_desc, header_ptr, body_ptr, 0);
+}
+
+Blob::Blob(const MemoryCase& mem_case,  // NOLINT，Blob::Blob(...) { // NOLINT
+           const BlobDesc* blob_desc, char* header_ptr, char* body_ptr, const int64_t offset) {
+  Init(mem_case, blob_desc, header_ptr, body_ptr, offset);
 }
 
 void Blob::Init(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* header_ptr,
-                char* body_ptr) {
+                char* body_ptr, const int64_t offset) {
   mem_case_ = mem_case;
   blob_desc_ = blob_desc;
+  storage_offset_ = offset;
   dptr_ = body_ptr;
   header_ptr_ = header_ptr;
-  this->blob_access_checker_ = Global<BlobAccessCheckerIf<true, true>>::Get();
+  this->blob_access_checker_ = Singleton<BlobAccessCheckerIf<true, true>>::Get();
   int64_t* shape_ptr = reinterpret_cast<int64_t*>(header_ptr);
   shape_view_.reset(new ShapeView(shape_ptr, static_shape().NumAxes()));
   if (blob_desc->is_dynamic()) {
@@ -42,26 +48,11 @@ void Blob::Init(const MemoryCase& mem_case, const BlobDesc* blob_desc, char* hea
   MutShapeView(shape_ptr, static_shape().NumAxes()).set_shape(static_shape());
 }
 
-void Blob::CopyDataContentFrom(DeviceCtx* device_ctx, const Blob* rhs) {
-  if (this == rhs) { return; }
-  this->blob_access_checker()->CheckBodyMutable();
-  AutoMemcpy(device_ctx, mut_dptr(), rhs->dptr(), ByteSizeOfBlobBody(), mem_case(),
-             rhs->mem_case());
-}
-
-void Blob::CopyValidDataContentFrom(DeviceCtx* device_ctx, const Blob* rhs) {
-  if (this == rhs) { return; }
-  this->blob_access_checker()->CheckBodyMutable();
-  const size_t body_byte_size = ByteSizeOfBlobBody();
-  CHECK_EQ(rhs->ByteSizeOfBlobBody(), body_byte_size);
-  AutoMemcpy(device_ctx, mut_dptr(), rhs->dptr(), body_byte_size, mem_case(), rhs->mem_case());
-}
-
-void Blob::CopyHeaderFrom(DeviceCtx* device_ctx, const Blob* rhs) {
+void Blob::CopyHeaderFrom(const Blob* rhs) {
   size_t header_size = blob_desc().ByteSizeOfBlobHeader();
   CHECK_EQ(header_size, rhs->blob_desc().ByteSizeOfBlobHeader());
   if (this == rhs || header_size == 0) { return; }
-  Memcpy<DeviceType::kCPU>(device_ctx, header_ptr_, rhs->header_ptr(), header_size);
+  std::memcpy(header_ptr_, rhs->header_ptr(), header_size);
 }
 
 char* Blob::mut_contiguous_header_ptr() {

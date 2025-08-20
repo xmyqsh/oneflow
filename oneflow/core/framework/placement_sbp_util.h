@@ -20,30 +20,27 @@ limitations under the License.
 #include "oneflow/core/common/maybe.h"
 #include "oneflow/core/common/symbol.h"
 #include "oneflow/core/common/decorator.h"
+#include "oneflow/core/job/sbp_parallel.h"
+#include "oneflow/core/common/stride.h"
 
 namespace oneflow {
 
 class Shape;
+class Stride;
 class ParallelDesc;
 class PlacedNdSbp;
 
-namespace cfg {
-
-class NdSbp;
-
-}
-
 namespace one {
 
-class ConsistentTensorMeta;
+class GlobalTensorMeta;
 
 }
 
 // 1) src_nd_sbp.sbp_parallel_size() == 1
 // 2) dst_nd_sbp.sbp_parallel_size() == 1
 struct NaiveBoxingTransformation {
-  Symbol<one::ConsistentTensorMeta> consistent_tensor_meta;
-  Symbol<cfg::NdSbp> dst_nd_sbp;
+  Symbol<one::GlobalTensorMeta> global_tensor_meta;
+  Symbol<NdSbp> dst_nd_sbp;
 };
 
 namespace private_details {
@@ -52,32 +49,39 @@ Maybe<std::vector<int64_t>> GetSelectedParallelIds(const Shape& hierarchy_shape,
                                                    const std::vector<int>& axis2is_selected,
                                                    int64_t parallel_id);
 
-Maybe<std::tuple<std::shared_ptr<const Shape>, Symbol<cfg::NdSbp>, Symbol<cfg::NdSbp>>>
+Maybe<std::tuple<std::shared_ptr<const Shape>, Symbol<NdSbp>, Symbol<NdSbp>>>
 CalcDecomposableEquivalentShapeAndNdSbpPair(const Shape& shape, const Shape& hierarchy,
-                                            Symbol<cfg::NdSbp> src_nd_sbp,
-                                            Symbol<cfg::NdSbp> dst_nd_sbp);
+                                            Symbol<NdSbp> src_nd_sbp, Symbol<NdSbp> dst_nd_sbp);
 
 Maybe<Symbol<ParallelDesc>> GetBroadcastSubParallelDesc(Symbol<ParallelDesc> parallel_desc,
-                                                        Symbol<cfg::NdSbp> nd_sbp);
+                                                        Symbol<NdSbp> nd_sbp);
 
 Maybe<std::vector<NaiveBoxingTransformation>> DecomposeIntoNaiveTransformations(
-    Symbol<one::ConsistentTensorMeta> tensor_meta, Symbol<cfg::NdSbp> dst_nd_sbp);
+    Symbol<one::GlobalTensorMeta> tensor_meta, Symbol<NdSbp> dst_nd_sbp);
 
-Maybe<bool> IsNdSbpBoxingAcyclic(Symbol<cfg::NdSbp> src_nd_sbp, Symbol<cfg::NdSbp> dst_nd_sbp);
+Maybe<bool> IsNdSbpBoxingAcyclic(Symbol<NdSbp> src_nd_sbp, Symbol<NdSbp> dst_nd_sbp);
 
-Maybe<std::vector<int64_t>> GetNdSbpValidTransformationAxisSequence(Symbol<cfg::NdSbp> src_nd_sbp,
-                                                                    Symbol<cfg::NdSbp> dst_nd_sbp);
+Maybe<std::vector<int64_t>> GetNdSbpValidTransformationAxisSequence(Symbol<NdSbp> src_nd_sbp,
+                                                                    Symbol<NdSbp> dst_nd_sbp);
 
-Maybe<Symbol<one::ConsistentTensorMeta>> CalcSubConsistentTensorMeta(
-    Symbol<one::ConsistentTensorMeta> tensor_meta, Symbol<ParallelDesc> sub_parallel_desc,
-    Symbol<cfg::NdSbp> sub_nd_sbp);
+Maybe<Symbol<one::GlobalTensorMeta>> CalcSubGlobalTensorMeta(
+    Symbol<one::GlobalTensorMeta> tensor_meta, Symbol<ParallelDesc> sub_parallel_desc,
+    Symbol<NdSbp> sub_nd_sbp);
+
+Maybe<Symbol<ParallelDesc>> CalcSubParallelDesc4Axis(Symbol<ParallelDesc> parallel_desc, int axis);
 
 }  // namespace private_details
 
 extern Maybe<void> (*CheckIsNdSbpBoxingAcyclic)(Symbol<PlacedNdSbp> in, Symbol<PlacedNdSbp> out);
 
-static constexpr auto* GetSubConsistentTensorMeta =
-    DECORATE(&private_details::CalcSubConsistentTensorMeta, ThreadLocal);
+extern Maybe<void> (*CheckIsNdSbpBoxingAcyclicWithDecompose)(Symbol<PlacedNdSbp> in,
+                                                             Symbol<PlacedNdSbp> out,
+                                                             const Shape& logical_shape);
+
+int64_t CalcIndex4Axis(int64_t offset, const Stride& stride, int axis);
+
+static constexpr auto* GetSubGlobalTensorMeta =
+    DECORATE(&private_details::CalcSubGlobalTensorMeta, ThreadLocal);
 
 static constexpr auto* GetBroadcastSubParallelDesc =
     DECORATE(&private_details::GetBroadcastSubParallelDesc, ThreadLocal);
@@ -85,11 +89,8 @@ static constexpr auto* GetBroadcastSubParallelDesc =
 static constexpr auto* DecomposeIntoNaiveTransformations =
     DECORATE(&private_details::DecomposeIntoNaiveTransformations, ThreadLocal);
 
-Maybe<std::unordered_map<int64_t, Symbol<ParallelDesc>>> GetBroadcastGroup(
-    Symbol<ParallelDesc> src_parallel_desc, Symbol<ParallelDesc> dst_parallel_desc);
-
-Maybe<std::unordered_map<int64_t, Symbol<ParallelDesc>>> GetBroadcastGroupWithoutAcrossNode(
-    Symbol<ParallelDesc> src_parallel_desc, Symbol<ParallelDesc> dst_parallel_desc);
+static constexpr auto* CalcSubParallelDesc4Axis =
+    DECORATE(&private_details::CalcSubParallelDesc4Axis, ThreadLocal);
 
 Maybe<std::unordered_map<int64_t, Symbol<ParallelDesc>>> GetBroadcastGroup(
     Symbol<ParallelDesc> src_parallel_desc, Symbol<ParallelDesc> dst_parallel_desc);

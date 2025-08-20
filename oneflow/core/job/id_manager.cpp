@@ -14,53 +14,53 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/job/id_manager.h"
-#include "oneflow/core/device/cuda_util.h"
-#include "oneflow/core/common/id_util.h"
-#include "oneflow/core/graph/id_serialization.h"
+#include "oneflow/core/rpc/include/global_process_ctx.h"
+#include "oneflow/core/framework/multi_client_session_context.h"
+#include "oneflow/core/job/id_state.h"
 
 namespace oneflow {
 
-DeviceType IDMgr::GetDeviceTypeFromThrdId(int64_t thrd_id) const {
-  return DeserializeStreamIdFromInt64(thrd_id).device_id().device_type();
+namespace {
+
+constexpr static int64_t kRankLimitShift = 16;
+constexpr static int64_t kIdLimitShift = (sizeof(int64_t) * 8 - kRankLimitShift);
+static_assert(kIdLimitShift > 0, "");
+
+int64_t AddCurrentRankOffset(int64_t x) {
+  CHECK_GE(x, 0);
+  CHECK_LT(x, (static_cast<int64_t>(1) << kIdLimitShift));
+  return (static_cast<int64_t>(GlobalProcessCtx::Rank()) << kIdLimitShift) + x;
 }
 
-int64_t IDMgr::GetGpuPhyIdFromThrdId(int64_t thrd_id) const {
-  StreamId stream_id = DeserializeStreamIdFromInt64(thrd_id);
-  DeviceId device_id = stream_id.device_id();
-  CHECK_EQ(device_id.device_type(), DeviceType::kGPU);
-  return device_id.device_index();
-}
-
-DeviceType IDMgr::GetDeviceTypeFromActorId(int64_t actor_id) const {
-  return DeserializeTaskIdFromInt64(actor_id).stream_id().device_id().device_type();
-}
-
-int64_t IDMgr::MachineId4ActorId(int64_t actor_id) const {
-  // TODO: change this inferface semantics, rank does not indicate machine_id in multi-client
-  return DeserializeTaskIdFromInt64(actor_id).stream_id().device_id().rank();
-}
-
-int64_t IDMgr::ThrdId4ActorId(int64_t actor_id) const {
-  return SerializeStreamIdToInt64(DeserializeTaskIdFromInt64(actor_id).stream_id());
-}
-
-int64_t IDMgr::PickCpuThrdIdEvenly(int64_t machine_id) {
-  DeviceId device_id{static_cast<DeviceId::rank_t>(machine_id), DeviceType::kCPU,
-                     DeviceId::kCPUDeviceIndex};
-  auto* stream_index_generator = GetStreamIndexGeneratorManager()->GetGenerator(device_id);
-  StreamId stream_id{device_id, stream_index_generator->GenerateComputeStreamIndex()};
-  return SerializeStreamIdToInt64(stream_id);
-}
+}  // namespace
 
 IDMgr::IDMgr() {
-  CHECK_LT((Global<ResourceDesc, ForSession>::Get()->process_ranks().size()),
-           static_cast<int64_t>(1) << machine_id_bit_num_);
-  gpu_device_num_ = Global<ResourceDesc, ForSession>::Get()->GpuDeviceNum();
-  cpu_device_num_ = Global<ResourceDesc, ForSession>::Get()->CpuDeviceNum();
-  CHECK_LT(gpu_device_num_ + cpu_device_num_, (static_cast<int64_t>(1) << thread_id_bit_num_) - 3);
   regst_desc_id_count_ = 0;
   mem_block_id_count_ = 0;
   chunk_id_count_ = 0;
+  CHECK_LE(GlobalProcessCtx::WorldSize(), (static_cast<int64_t>(1) << kRankLimitShift));
+}
+
+int64_t IDMgr::NewRegstDescId() { return AddCurrentRankOffset(regst_desc_id_count_++); }
+
+int64_t IDMgr::NewMemBlockId() { return AddCurrentRankOffset(mem_block_id_count_++); }
+
+int64_t IDMgr::NewChunkId() { return AddCurrentRankOffset(chunk_id_count_++); }
+void IDMgr::SaveIdAndTaskIndex(IdState* id_state) {
+  id_state->regst_desc_id_state_ = regst_desc_id_count_;
+  id_state->mem_block_id_state_ = mem_block_id_count_;
+  id_state->chunk_id_state_ = chunk_id_count_;
+  task_id_gen_.GetTaskIndex(&id_state->task_index_state_);
+}
+
+void IDMgr::TryUpdateIdAndTaskIndex(const IdState* id_state) {
+  regst_desc_id_count_ = std::max(regst_desc_id_count_.load(std::memory_order_relaxed),
+                                  id_state->regst_desc_id_state_);
+  mem_block_id_count_ =
+      std::max(mem_block_id_count_.load(std::memory_order_relaxed), id_state->mem_block_id_state_);
+  chunk_id_count_ =
+      std::max(chunk_id_count_.load(std::memory_order_relaxed), id_state->chunk_id_state_);
+  task_id_gen_.TryUpdateTaskIndex(id_state->task_index_state_);
 }
 
 }  // namespace oneflow

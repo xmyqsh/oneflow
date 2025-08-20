@@ -18,15 +18,16 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList, type_name_to_flow_type
+from oneflow.test_utils.test_util import GenArgList, type_name_to_flow_type
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_sort(test_case, data_shape, axis, descending, data_type, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(*data_shape),
         dtype=type_name_to_flow_type[data_type],
         device=flow.device(device),
@@ -45,7 +46,7 @@ def _test_sort(test_case, data_shape, axis, descending, data_type, device):
 
 
 def _test_tensor_sort(test_case, data_shape, axis, descending, data_type, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(*data_shape),
         dtype=type_name_to_flow_type[data_type],
         device=flow.device(device),
@@ -76,12 +77,35 @@ class TestSort(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest(auto_backward=False)
+    @autotest(n=5, auto_backward=False, check_graph=True)
     def test_sort_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(ndim=4).to(device)
+        x = random_tensor(ndim=4).to(device)
         y = torch.sort(x, dim=random(low=-4, high=4).to(int), descending=random_bool())
         return y[0], y[1]
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_sort_return_type_with_random_data_(test_case):
+        device = random_device()
+        x = random_tensor(ndim=4).to(device)
+        result = torch.sort(
+            x, dim=random(low=-4, high=4).to(int), descending=random_bool()
+        )
+        return result.values, result.indices
+
+    @autotest(n=10, auto_backward=False, check_graph=True)
+    def test_sort_bool_with_random_data(test_case):
+        x = random_tensor(ndim=4).to(device="cpu", dtype=torch.bool)
+        y = torch.sort(x, dim=random(low=-4, high=4).to(int), descending=random_bool())
+        return y[0], y[1]
+
+    @autotest(n=10, auto_backward=False, check_graph=True)
+    def test_sort_return_type_bool_with_random_data(test_case):
+        x = random_tensor(ndim=4).to(device="cpu", dtype=torch.bool)
+        result = torch.sort(
+            x, dim=random(low=-4, high=4).to(int), descending=random_bool()
+        )
+        return result.values, result.indices
 
 
 if __name__ == "__main__":

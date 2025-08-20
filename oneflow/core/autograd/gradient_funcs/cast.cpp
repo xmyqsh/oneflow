@@ -19,42 +19,43 @@ limitations under the License.
 #include "oneflow/core/framework/op_builder.h"
 #include "oneflow/core/framework/op_interpreter/op_interpreter_util.h"
 #include "oneflow/core/framework/op_expr.h"
-#include "oneflow/core/framework/op_expr_helper.h"
+#include "oneflow/core/functional/functional.h"
+#include "oneflow/core/common/symbol.h"
 
 namespace oneflow {
 namespace one {
 
 struct CastCaptureState : public AutoGradCaptureState {
-  DataType data_type;
+  Symbol<DType> in_dtype;
+  Symbol<DType> out_dtype;
 };
 
 class Cast : public OpExprGradFunction<CastCaptureState> {
  public:
   Maybe<void> Init(const OpExpr& op) override {
     const auto* fw_op_expr = dynamic_cast<const UserOpExpr*>(&op);
-    CHECK_NOTNULL_OR_RETURN(fw_op_expr);
-    const std::string& op_name = fw_op_expr->op_name();
-    grad_op_ = JUST(op_expr_helper::CastOp(DataType::kInvalidDataType, GradientOpName(op_name)));
+    CHECK_NOTNULL_OR_RETURN(fw_op_expr);  // NOLINT(maybe-need-error-msg)
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Capture(CastCaptureState* ctx, const TensorTuple& inputs, const TensorTuple& outputs,
                       const AttrMap& attrs) const override {
-    ctx->data_type = inputs.at(0)->dtype()->data_type();
+    ctx->in_dtype = inputs.at(0)->dtype();
+    ctx->out_dtype = outputs.at(0)->dtype();
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Apply(const CastCaptureState* ctx, const TensorTuple& out_grads,
                     TensorTuple* in_grads) const override {
     in_grads->resize(1);
-    MutableAttrMap attrs;
-    JUST(attrs.SetAttr<DataType>("dtype", ctx->data_type));
-    in_grads->at(0) = JUST(OpInterpUtil::Dispatch<Tensor>(*grad_op_, {out_grads.at(0)}, attrs));
+    if (!IsComplexDataType(ctx->in_dtype->data_type())
+        && IsComplexDataType(ctx->out_dtype->data_type())) {
+      (*in_grads)[0] = JUST(functional::Real(out_grads[0]));
+    } else {
+      (*in_grads)[0] = JUST(functional::Cast(out_grads[0], ctx->in_dtype, /*pin_memory=*/false));
+    }
     return Maybe<void>::Ok();
   }
-
- private:
-  std::shared_ptr<OpExpr> grad_op_;
 };
 
 REGISTER_OP_EXPR_GRAD_FUNCTION("cast", Cast);

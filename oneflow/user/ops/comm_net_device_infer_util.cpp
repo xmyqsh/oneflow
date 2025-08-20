@@ -14,30 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/user/ops/comm_net_device_infer_util.h"
+#include "oneflow/core/common/decorator.h"
 
 namespace oneflow {
 
-Maybe<bool> SyncLaunched(user_op::DeviceInferContext* ctx) { return false; }
-
-Maybe<bool> IsAsyncLaunched(user_op::DeviceInferContext* ctx) {
-  return ctx->Attr<bool>("async_launch");
-}
-
 namespace {
 
-Maybe<Symbol<Device>> RawGetNcclDevice(bool is_async_launced) {
-  return Device::New(is_async_launced ? "async_launched_nccl" : "sync_launched_nccl");
+Maybe<Symbol<Stream>> RawGetTransportDevice(Symbol<Device> device) {
+  return Stream::New(JUST(Device::New(device->type())), StreamType::kCcl);
 }
-
-Maybe<Symbol<Device>> RawGetCpuTransportDevice() { return Device::New("comm_net"); }
 
 }  // namespace
 
-decltype(GetNcclDevice) GetNcclDevice = DECORATE(&RawGetNcclDevice, ThreadLocal);
-decltype(GetCpuTransportDevice) GetCpuTransportDevice =
-    DECORATE(&RawGetCpuTransportDevice, ThreadLocal);
+decltype(GetTransportDevice) GetTransportDevice = DECORATE(&RawGetTransportDevice, ThreadLocal);
 
-Maybe<Symbol<Device>> DefaultGetOutputDeivce(user_op::DeviceInferContext* ctx) {
+Maybe<Symbol<Device>> DefaultGetOutputDeivce(user_op::DeviceAndStreamInferContext* ctx) {
   CHECK_GT_OR_RETURN(ctx->inputs().size(), 0);
   return ctx->InputTensorDevice4ArgNameAndIndex("in", 0);
 }

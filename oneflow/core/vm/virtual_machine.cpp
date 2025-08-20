@@ -13,699 +13,475 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "oneflow/api/foreign_lock_helper.h"
-#include "oneflow/core/vm/virtual_machine.msg.h"
-#include "oneflow/core/vm/vm_desc.msg.h"
-#include "oneflow/core/vm/infer_stream_type.h"
-#include "oneflow/core/vm/instruction_type.h"
-#include "oneflow/core/vm/object_wrapper.h"
-#include "oneflow/core/common/util.h"
-#include "oneflow/core/common/balanced_splitter.h"
-#include "oneflow/core/common/spin_counter.h"
-#include "oneflow/core/framework/device.h"
-#include "oneflow/core/job/parallel_desc.h"
+#include <typeinfo>
+#include <thread>
+#include <chrono>
+#include "oneflow/core/vm/sync_vm_mode_guard.h"
+#include "oneflow/core/vm/barrier_instruction_policy.h"
+#include "oneflow/core/vm/caching_allocator.h"
+#include "oneflow/core/vm/global_sync_instruction_policy.h"
+#include "oneflow/core/vm/virtual_machine.h"
+#include "oneflow/core/vm/instruction.h"
+#include "oneflow/core/vm/vm_util.h"
+#include "oneflow/core/vm/allocator.h"
+#include "oneflow/core/common/blocking_counter.h"
+#include "oneflow/core/common/cpp_attribute.h"
+#include "oneflow/core/control/global_process_ctx.h"
+#include "oneflow/core/job/global_for.h"
+#include "oneflow/core/common/foreign_lock_helper.h"
+#include "oneflow/core/thread/thread_global_id.h"
+#include "oneflow/core/framework/transport_token.h"
+#include "oneflow/core/framework/to_string.h"
+#include "oneflow/core/framework/stream_on_independent_thread.h"
+#include "oneflow/core/framework/stream_is_comm_net_stream.h"
+#include "oneflow/core/profiler/profiler.h"
 #include "oneflow/core/platform/include/pthread_fork.h"
+#include "oneflow/core/common/env_var/env_var.h"
+#include "oneflow/core/common/env_var/vm.h"
+#include "oneflow/core/common/container_util.h"
+#include "oneflow/core/framework/device.h"
+#include "oneflow/core/framework/stream.h"
+#include "oneflow/core/framework/stream_get_stream_type_name.h"
+#include "oneflow/core/framework/stream_mgr.h"
 
 namespace oneflow {
-namespace vm {
 
 namespace {
 
-bool HasImmediateOperandsOnly(const InstructionMsg& instr_msg) {
-  for (const auto& instr_operand : instr_msg.operand()) {
-    if (instr_operand->has_const_operand()) { return false; }
-    if (instr_operand->has_mut_operand()) { return false; }
-    if (instr_operand->has_mut2_operand()) { return false; }
-    if (instr_operand->has_del_operand()) { return false; }
-    if (instr_operand->has_symbol_operand()) { return false; }
-    if (instr_operand->has_init_symbol_operand()) { return false; }
-    CHECK(instr_operand->has_separator() || instr_operand->has_double_operand()
-          || instr_operand->has_double_operand() || instr_operand->has_int64_operand()
-          || instr_operand->has_uint64_operand() || instr_operand->has_bool_operand());
+template<typename T>
+int MicrosecondsFrom(const T& start) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()
+                                                               - start)
+      .count();
+}
+
+Maybe<void> ForEachThreadCtx(vm::VirtualMachineEngine* engine,
+                             const std::function<Maybe<void>(vm::ThreadCtx*)>& DoEach) {
+  INTRUSIVE_UNSAFE_FOR_EACH_PTR(thread_ctx, engine->mut_thread_ctx_list()) {
+    JUST(DoEach(thread_ctx));
   }
-  return true;
-}
-
-}  // namespace
-
-void VirtualMachine::ReleaseInstruction(Instruction* instruction,
-                                        /*out*/ ReadyInstructionList* ready_instruction_list) {
-  auto* access_list = instruction->mut_access_list();
-  auto* rw_mutexed_object_accesses = instruction->mut_mirrored_object_id2access();
-  OBJECT_MSG_LIST_FOR_EACH(access_list, access) {
-    CHECK_GT(access->ref_cnt(), 1);
-    access_list->Erase(access.Mutable());
-    if (access->is_mirrored_object_id_inserted()) {
-      rw_mutexed_object_accesses->Erase(access.Mutable());
-    }
-    auto* mirrored_object = access->mut_mirrored_object();
-    if (!access->is_rw_mutexed_object_access_link_empty()) {
-      CHECK_EQ(access->mut_rw_mutexed_object(), mirrored_object->mut_rw_mutexed_object());
-      mirrored_object->mut_rw_mutexed_object()->mut_access_list()->Erase(access.Mutable());
-    }
-  }
-  CHECK_EQ(rw_mutexed_object_accesses->size(), 0);
-  TryMoveWaitingToReady(instruction, ready_instruction_list, [](Instruction*) { return true; });
-}
-
-void VirtualMachine::TryReleaseFinishedInstructions(
-    Stream* stream,
-    /*out*/ ReadyInstructionList* ready_instruction_list) {
-  auto* running_instruction_list = stream->mut_running_instruction_list();
-  auto* front_seq_compute_list = mutable_front_seq_compute_instr_list();
-  auto* vm_stat_running_list = mut_vm_stat_running_instruction_list();
-  while (true) {
-    auto* instruction_ptr = running_instruction_list->Begin();
-    if (instruction_ptr == nullptr || !instruction_ptr->Done()) { break; }
-    ReleaseInstruction(instruction_ptr, /*out*/ ready_instruction_list);
-    const auto interpret_type = instruction_ptr->stream().stream_type_id().interpret_type();
-    if (interpret_type == kInfer) {
-      // do nothing
-    } else if (interpret_type == kCompute) {
-      CHECK(!instruction_ptr->is_front_seq_compute_instr_link_empty());
-      front_seq_compute_list->Erase(instruction_ptr);
-    } else {
-      UNIMPLEMENTED();
-    }
-    vm_stat_running_list->Erase(instruction_ptr);
-    stream->DeleteInstruction(running_instruction_list->Erase(instruction_ptr));
-  }
-}
-
-void VirtualMachine::FilterAndRunInstructionsInAdvance(TmpPendingInstrMsgList* instr_msg_list) {
-  OBJECT_MSG_LIST_FOR_EACH_PTR(instr_msg_list, instr_msg) {
-    const auto& instr_type_id = instr_msg->instr_type_id();
-    if (instr_type_id.instruction_type().ResettingIdToObjectMap()) {
-      const StreamType& stream_type = instr_type_id.stream_type_id().stream_type();
-      CHECK(stream_type.IsControlStreamType());
-      CHECK(HasImmediateOperandsOnly(*instr_msg));
-      const auto& parallel_desc = CHECK_JUST(GetInstructionParallelDesc(*instr_msg));
-      if (!parallel_desc || parallel_desc->ContainingMachineId(this_machine_id())) {
-        stream_type.Run(this, instr_msg);
-      }
-      instr_msg_list->Erase(instr_msg);
-    }
-  }
-}
-
-int64_t VirtualMachine::this_machine_id() const {
-  CHECK_EQ(machine_id_range().size(), 1);
-  return machine_id_range().begin();
-}
-
-namespace {
-
-bool IsStreamInParallelDesc(const ParallelDesc* parallel_desc, const Stream& stream) {
-  if (parallel_desc == nullptr) { return true; }
-  if (stream.stream_type().IsControlStreamType()) {
-    return parallel_desc->ContainingMachineId(stream.machine_id());
-  }
-  return parallel_desc->Containing(stream.machine_id(), stream.device_id());
-}
-
-}  // namespace
-
-void VirtualMachine::MakeInstructions(TmpPendingInstrMsgList* instr_msg_list,
-                                      /*out*/ NewInstructionList* new_instruction_list) {
-  auto* front_seq_compute_list = mutable_front_seq_compute_instr_list();
-  OBJECT_MSG_LIST_FOR_EACH_PTR(instr_msg_list, instr_msg) {
-    const StreamTypeId& stream_type_id = instr_msg->instr_type_id().stream_type_id();
-    auto* stream_rt_desc = mut_stream_type_id2stream_rt_desc()->FindPtr(stream_type_id);
-    const auto& instruction_type = instr_msg->instr_type_id().instruction_type();
-    if (stream_rt_desc == nullptr) {
-      const auto& stream_type = stream_type_id.stream_type();
-      LOG(FATAL) << typeid(instruction_type).name() << " " << typeid(stream_type).name();
-    }
-    bool is_front_seq = instruction_type.IsFrontSequential();
-    if (is_front_seq) { CHECK_EQ(stream_rt_desc->stream_id2stream().size(), 1); }
-    const auto& parallel_desc = CHECK_JUST(GetInstructionParallelDesc(*instr_msg));
-    OBJECT_MSG_SKIPLIST_UNSAFE_FOR_EACH_PTR(stream_rt_desc->mut_stream_id2stream(), stream) {
-      if (!IsStreamInParallelDesc(parallel_desc.get(), *stream)) { continue; }
-      ObjectMsgPtr<Instruction> instr = stream->NewInstruction(instr_msg, parallel_desc);
-      if (stream_type_id.interpret_type() == kInfer) {
-        // do nothing
-      } else if (stream_type_id.interpret_type() == kCompute) {
-        front_seq_compute_list->PushBack(instr.Mutable());
-      } else {
-        UNIMPLEMENTED();
-      }
-      if (!is_front_seq) { new_instruction_list->PushBack(instr.Mutable()); }
-    }
-    instr_msg_list->Erase(instr_msg);
-  }
-}
-
-Maybe<const ParallelDesc> VirtualMachine::GetInstructionParallelDesc(
-    const InstructionMsg& instr_msg) {
-  static const std::shared_ptr<const ParallelDesc> empty_ptr;
-  if (instr_msg.parallel_desc()) { return instr_msg.parallel_desc(); }
-  if (!instr_msg.has_parallel_desc_symbol_id()) { return empty_ptr; }
-  int64_t symbol_id = instr_msg.parallel_desc_symbol_id();
-  auto* logical_object = mut_id2logical_object()->FindPtr(symbol_id);
-  CHECK_NOTNULL_OR_RETURN(logical_object) << "symbol_id: " << symbol_id;
-  auto* map = logical_object->mut_global_device_id2mirrored_object();
-  CHECK_EQ_OR_RETURN(map->size(), 1);
-  const std::shared_ptr<const ParallelDesc> parallel_desc =
-      JUST(map->Begin()->rw_mutexed_object().Get<ObjectWrapper<ParallelDesc>>()).GetPtr();
-  return parallel_desc;
-}
-
-MirroredObject* VirtualMachine::MutMirroredObject(int64_t logical_object_id,
-                                                  int64_t global_device_id) {
-  auto* logical_object = mut_id2logical_object()->FindPtr(logical_object_id);
-  if (logical_object == nullptr) { return nullptr; }
-  return logical_object->mut_global_device_id2mirrored_object()->FindPtr(global_device_id);
-}
-
-const MirroredObject* VirtualMachine::GetMirroredObject(int64_t logical_object_id,
-                                                        int64_t global_device_id) {
-  return MutMirroredObject(logical_object_id, global_device_id);
-}
-
-template<int64_t (*TransformLogicalObjectId)(int64_t), typename DoEachT>
-void VirtualMachine::ForEachMirroredObject(Id2LogicalObject* id2logical_object,
-                                           const Operand& operand, int64_t global_device_id,
-                                           const DoEachT& DoEach) {
-  int64_t logical_object_id = operand.logical_object_id();
-  logical_object_id = TransformLogicalObjectId(logical_object_id);
-  auto* logical_object = id2logical_object->FindPtr(logical_object_id);
-  if (logical_object == nullptr) { return; }
-  auto* map = logical_object->mut_global_device_id2mirrored_object();
-  if (operand.has_all_mirrored_object()) {
-    OBJECT_MSG_MAP_FOR_EACH_PTR(map, mirrored_object) { DoEach(mirrored_object); }
-  } else {
-    auto* mirrored_object = map->FindPtr(operand.GetGlobalDeviceId(global_device_id));
-    if (mirrored_object != nullptr) { DoEach(mirrored_object); }
-  }
-}
-
-template<OperandMemZoneModifier mem_zone_modifier, typename DoEachT>
-void VirtualMachine::ForEachConstMirroredObject(
-    InterpretType interpret_type, Id2LogicalObject* id2logical_object,
-    const ModifiedOperand<kConstModifier, mem_zone_modifier>& const_operand,
-    int64_t global_device_id, const DoEachT& DoEach) {
-  const Operand& operand = const_operand.operand();
-  if (interpret_type == InterpretType::kCompute) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-    ForEachMirroredObject<&IdUtil::GetValueId>(id2logical_object, operand, global_device_id,
-                                               DoEach);
-  } else if (interpret_type == InterpretType::kInfer) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-namespace {
-
-template<typename CallbackT>
-void ForEachConstMirroredObject4ConstPhyInstrOperand(InterpretType interpret_type,
-                                                     const PhyInstrOperand& phy_instr_operand,
-                                                     const CallbackT& Callback) {
-  if (interpret_type == InterpretType::kCompute) {
-    phy_instr_operand.ForEachConstMirroredObject(
-        [&](MirroredObject* infer, MirroredObject* compute) {
-          if (infer != nullptr) { Callback(infer); }
-          if (compute != nullptr) { Callback(compute); }
-        });
-  } else if (interpret_type == InterpretType::kInfer) {
-    phy_instr_operand.ForEachConstMirroredObject(
-        [&](MirroredObject* infer, MirroredObject* compute) {
-          if (infer != nullptr) { Callback(infer); }
-        });
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-}  // namespace
-
-template<OperandMemZoneModifier mem_zone_modifier, typename DoEachT>
-void VirtualMachine::ForEachConstMirroredObject(
-    const InterpretType interpret_type, Id2LogicalObject* id2logical_object,
-    const ModifiedOperand<kDataMutableModifier, mem_zone_modifier>& mutable_operand,
-    int64_t global_device_id, const DoEachT& DoEach) {
-  const Operand& operand = mutable_operand.operand();
-  if (interpret_type == InterpretType::kCompute) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-  } else if (interpret_type == InterpretType::kInfer) {
-    // Do nothing
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-namespace {
-
-template<typename CallbackT>
-void ForEachConstMirroredObject4MutPhyInstrOperand(InterpretType interpret_type,
-                                                   const PhyInstrOperand& phy_instr_operand,
-                                                   const CallbackT& Callback) {
-  if (interpret_type == InterpretType::kCompute) {
-    phy_instr_operand.ForEachMutMirroredObject([&](MirroredObject* infer, MirroredObject* compute) {
-      if (infer != nullptr) { Callback(infer); }
-    });
-  } else if (interpret_type == InterpretType::kInfer) {
-    // Do nothing
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-}  // namespace
-
-template<OperandMemZoneModifier mem_zone_modifier, typename DoEachT>
-void VirtualMachine::ForEachMutMirroredObject(
-    const InterpretType interpret_type, Id2LogicalObject* id2logical_object,
-    const ModifiedOperand<kDataMutableModifier, mem_zone_modifier>& mutable_operand,
-    int64_t global_device_id, const DoEachT& DoEach) {
-  const Operand& operand = mutable_operand.operand();
-  if (interpret_type == InterpretType::kCompute) {
-    ForEachMirroredObject<&IdUtil::GetValueId>(id2logical_object, operand, global_device_id,
-                                               DoEach);
-  } else if (interpret_type == InterpretType::kInfer) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-namespace {
-
-template<typename CallbackT>
-void ForEachMutMirroredObject4MutPhyInstrOperand(InterpretType interpret_type,
-                                                 const PhyInstrOperand& phy_instr_operand,
-                                                 const CallbackT& Callback) {
-  if (interpret_type == InterpretType::kCompute) {
-    phy_instr_operand.ForEachMutMirroredObject(
-        [&](MirroredObject* infer, MirroredObject* compute) { Callback(compute); });
-  } else if (interpret_type == InterpretType::kInfer) {
-    phy_instr_operand.ForEachMutMirroredObject([&](MirroredObject* infer, MirroredObject* compute) {
-      if (infer != nullptr) { Callback(infer); }
-    });
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-}  // namespace
-
-template<OperandMemZoneModifier mem_zone_modifier, typename DoEachT>
-void VirtualMachine::ForEachMutMirroredObject(
-    const InterpretType interpret_type, Id2LogicalObject* id2logical_object,
-    const ModifiedOperand<kTypeAndDataMutableModifier, mem_zone_modifier>& mut2_operand,
-    int64_t global_device_id, const DoEachT& DoEach) {
-  const Operand& operand = mut2_operand.operand();
-  if (interpret_type == InterpretType::kCompute) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-    ForEachMirroredObject<&IdUtil::GetValueId>(id2logical_object, operand, global_device_id,
-                                               DoEach);
-  } else if (interpret_type == InterpretType::kInfer) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-namespace {
-
-template<typename CallbackT>
-void ForEachMutMirroredObject4Mut2PhyInstrOperand(InterpretType interpret_type,
-                                                  const PhyInstrOperand& phy_instr_operand,
-                                                  const CallbackT& Callback) {
-  if (interpret_type == InterpretType::kCompute) {
-    phy_instr_operand.ForEachMut2MirroredObject(
-        [&](MirroredObject* infer, MirroredObject* compute) {
-          if (infer != nullptr) { Callback(infer); }
-          Callback(compute);
-        });
-  } else if (interpret_type == InterpretType::kInfer) {
-    phy_instr_operand.ForEachMut2MirroredObject(
-        [&](MirroredObject* infer, MirroredObject* compute) {
-          if (infer != nullptr) { Callback(infer); }
-        });
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-}  // namespace
-
-template<OperandMemZoneModifier mem_zone_modifier, typename DoEachT>
-void VirtualMachine::ForEachMutMirroredObject(
-    const InterpretType interpret_type, Id2LogicalObject* id2logical_object,
-    const ModifiedOperand<kDeleteModifier, mem_zone_modifier>& mutable_operand,
-    int64_t global_device_id, const DoEachT& DoEach) {
-  const Operand& operand = mutable_operand.operand();
-  if (interpret_type == InterpretType::kCompute) {
-    ForEachMirroredObject<&IdUtil::GetValueId>(id2logical_object, operand, global_device_id,
-                                               DoEach);
-  } else if (interpret_type == InterpretType::kInfer) {
-    ForEachMirroredObject<&IdUtil::GetTypeId>(id2logical_object, operand, global_device_id, DoEach);
-  } else {
-    UNIMPLEMENTED();
-  }
-}
-
-RwMutexedObjectAccess* VirtualMachine::ConsumeMirroredObject(OperandAccessType access_type,
-                                                             MirroredObject* mirrored_object,
-                                                             Instruction* instruction) {
-  auto rw_mutexed_object_access = ObjectMsgPtr<RwMutexedObjectAccess>::NewFrom(
-      instruction->mut_allocator(), instruction, mirrored_object, access_type);
-  instruction->mut_mirrored_object_id2access()->Insert(rw_mutexed_object_access.Mutable());
-  instruction->mut_access_list()->PushBack(rw_mutexed_object_access.Mutable());
-  mirrored_object->mut_rw_mutexed_object()->mut_access_list()->EmplaceBack(
-      std::move(rw_mutexed_object_access));
-  return rw_mutexed_object_access.Mutable();
-}
-
-void VirtualMachine::ConnectInstruction(Instruction* src_instruction,
-                                        Instruction* dst_instruction) {
-  CHECK_NE(src_instruction, dst_instruction);
-  auto edge = ObjectMsgPtr<InstructionEdge>::NewFrom(mut_vm_thread_only_allocator(),
-                                                     src_instruction, dst_instruction);
-  src_instruction->mut_out_edges()->PushBack(edge.Mutable());
-  dst_instruction->mut_in_edges()->PushBack(edge.Mutable());
-}
-
-void VirtualMachine::ConsumeMirroredObjects(Id2LogicalObject* id2logical_object,
-                                            NewInstructionList* new_instruction_list) {
-  OBJECT_MSG_LIST_FOR_EACH_PTR(new_instruction_list, instruction) {
-    int64_t global_device_id = instruction->stream().global_device_id();
-    const InterpretType interpret_type = instruction->stream().stream_type_id().interpret_type();
-    auto ConsumeConstMirroredObject = [&](MirroredObject* mirrored_object) {
-      ConsumeMirroredObject(kConstOperandAccess, mirrored_object, instruction);
-    };
-    auto ConsumeMutMirroredObject = [&](MirroredObject* mirrored_object) {
-      ConsumeMirroredObject(kMutableOperandAccess, mirrored_object, instruction);
-    };
-    auto ConsumeDelMirroredObject = [&](MirroredObject* mirrored_object) {
-      auto* access = ConsumeMirroredObject(kMutableOperandAccess, mirrored_object, instruction);
-      CHECK(!mirrored_object->has_deleting_access());
-      mirrored_object->set_deleting_access(access);
-    };
-    const auto& phy_instr_operand = instruction->instr_msg().phy_instr_operand();
-    if (phy_instr_operand) {
-      ForEachMutMirroredObject4Mut2PhyInstrOperand(interpret_type, *phy_instr_operand,
-                                                   ConsumeMutMirroredObject);
-      ForEachMutMirroredObject4MutPhyInstrOperand(interpret_type, *phy_instr_operand,
-                                                  ConsumeMutMirroredObject);
-    }
-    const auto& operands = instruction->instr_msg().operand();
-    for (const auto& operand : operands) {
-      if (operand->has_mut_operand()) {
-        ForEachMutMirroredObject<kDeviceMemZoneModifier>(interpret_type, id2logical_object,
-                                                         operand->mut_operand(), global_device_id,
-                                                         ConsumeMutMirroredObject);
-      } else if (operand->has_mut2_operand()) {
-        ForEachMutMirroredObject<kDeviceMemZoneModifier>(interpret_type, id2logical_object,
-                                                         operand->mut2_operand(), global_device_id,
-                                                         ConsumeMutMirroredObject);
-      } else if (operand->has_del_operand()) {
-        ForEachMutMirroredObject<kDeviceMemZoneModifier>(interpret_type, id2logical_object,
-                                                         operand->del_operand(), global_device_id,
-                                                         ConsumeDelMirroredObject);
-      } else if (operand->has_init_symbol_operand()) {
-        const auto& symbol_operand = operand->init_symbol_operand().operand();
-        CHECK(symbol_operand.has_sole_mirrored_object());
-        ForEachMutMirroredObject<kHostConstMemZoneModifier>(interpret_type, id2logical_object,
-                                                            operand->init_symbol_operand(), 0,
-                                                            ConsumeMutMirroredObject);
-      } else {
-        // do nothing
-      }
-    }
-    if (phy_instr_operand) {
-      ForEachConstMirroredObject4MutPhyInstrOperand(interpret_type, *phy_instr_operand,
-                                                    ConsumeConstMirroredObject);
-      ForEachConstMirroredObject4ConstPhyInstrOperand(interpret_type, *phy_instr_operand,
-                                                      ConsumeConstMirroredObject);
-    }
-    for (const auto& operand : operands) {
-      if (operand->has_const_operand()) {
-        ForEachConstMirroredObject<kDeviceMemZoneModifier>(
-            interpret_type, id2logical_object, operand->const_operand(), global_device_id,
-            ConsumeConstMirroredObject);
-      } else if (operand->has_mut_operand()) {
-        ForEachConstMirroredObject<kDeviceMemZoneModifier>(interpret_type, id2logical_object,
-                                                           operand->mut_operand(), global_device_id,
-                                                           ConsumeConstMirroredObject);
-      } else if (operand->has_symbol_operand()) {
-        const auto& symbol_operand = operand->symbol_operand().operand();
-        CHECK(symbol_operand.has_sole_mirrored_object());
-        ForEachConstMirroredObject<kHostConstMemZoneModifier>(interpret_type, id2logical_object,
-                                                              operand->symbol_operand(), 0,
-                                                              ConsumeConstMirroredObject);
-      } else if (operand->has_init_symbol_operand()) {
-        const auto& symbol_operand = operand->init_symbol_operand().operand();
-        CHECK(symbol_operand.has_sole_mirrored_object());
-        ForEachConstMirroredObject<kHostConstMemZoneModifier>(interpret_type, id2logical_object,
-                                                              operand->init_symbol_operand(), 0,
-                                                              ConsumeConstMirroredObject);
-      } else {
-        // do nothing
-      }
-    }
-    auto* rw_mutexed_object_accesses = instruction->mut_mirrored_object_id2access();
-    OBJECT_MSG_SKIPLIST_UNSAFE_FOR_EACH_PTR(rw_mutexed_object_accesses, rw_mutexed_object_access) {
-      auto* mirrored_object = rw_mutexed_object_access->mut_mirrored_object();
-      if (mirrored_object->has_deleting_access()
-          && mirrored_object->mut_deleting_access() != rw_mutexed_object_access) {
-        UNIMPLEMENTED() << " accessing a deleting object "
-                        << mirrored_object->mirrored_object_id().logical_object_id_value();
-      }
-      if (mirrored_object->rw_mutexed_object().access_list().size() == 1) { continue; }
-      if (rw_mutexed_object_access->is_const_operand()) {
-        auto* first = mirrored_object->mut_rw_mutexed_object()->mut_access_list()->Begin();
-        if (first->is_const_operand()) {
-          // do nothing
-        } else if (first->is_mut_operand()) {
-          if (first->mut_instruction() != instruction) {
-            ConnectInstruction(first->mut_instruction(), instruction);
-          }
-        } else {
-          UNIMPLEMENTED();
-        }
-      } else {
-        CHECK(rw_mutexed_object_access->is_mut_operand());
-        auto* access_list = mirrored_object->mut_rw_mutexed_object()->mut_access_list();
-        OBJECT_MSG_LIST_FOR_EACH_PTR(access_list, access) {
-          if (access == rw_mutexed_object_access) { break; }
-          CHECK(access->is_const_operand() || access->is_mut_operand())
-              << "access type " << access->access_type() << " not supported";
-          if (access->mut_instruction() != instruction) {
-            ConnectInstruction(access->mut_instruction(), instruction);
-          }
-          CHECK_EQ(access->mut_rw_mutexed_object(), mirrored_object->mut_rw_mutexed_object());
-          access_list->Erase(access);
-        }
-      }
-    }
-  }
-}
-
-void VirtualMachine::FilterReadyInstructions(NewInstructionList* new_instruction_list,
-                                             /*out*/ ReadyInstructionList* ready_instruction_list) {
-  OBJECT_MSG_LIST_FOR_EACH_PTR(new_instruction_list, instruction) {
-    if (instruction->in_edges().empty()) {
-      new_instruction_list->MoveToDstBack(instruction, ready_instruction_list);
-    }
-  }
-}
-
-void VirtualMachine::DispatchAndPrescheduleInstructions(
-    ReadyInstructionList* ready_instruction_list) {
-  PrescheduledInstructionList prescheduled;
-  auto* active_stream_list = mut_active_stream_list();
-  auto* vm_stat_running_list = mut_vm_stat_running_instruction_list();
-  OBJECT_MSG_LIST_FOR_EACH_PTR(ready_instruction_list, instruction) {
-    vm_stat_running_list->PushBack(instruction);
-    auto* stream = instruction->mut_stream();
-    ready_instruction_list->MoveToDstBack(instruction, stream->mut_running_instruction_list());
-    if (stream->is_active_stream_link_empty()) { active_stream_list->PushBack(stream); }
-    const auto& stream_type = stream->stream_type();
-    if (stream_type.SharingVirtualMachineThread()) {
-      stream_type.Run(this, instruction);
-    } else {
-      stream->mut_thread_ctx()->mut_pending_instruction_list()->PushBack(instruction);
-    }
-    TryMoveWaitingToReady(instruction, &prescheduled,
-                          [stream](Instruction* dst) { return &dst->stream() == stream; });
-  }
-  prescheduled.MoveTo(ready_instruction_list);
-}
-
-template<typename ReadyList, typename IsEdgeReadyT>
-void VirtualMachine::TryMoveWaitingToReady(Instruction* instruction, ReadyList* ready_list,
-                                           const IsEdgeReadyT& IsEdgeReady) {
-  auto* wait_instruction_list = mut_waiting_instruction_list();
-  auto* out_edges = instruction->mut_out_edges();
-  OBJECT_MSG_LIST_FOR_EACH_PTR(out_edges, out_edge) {
-    Instruction* out_instruction = out_edge->mut_dst_instruction();
-    if (!IsEdgeReady(out_instruction)) { continue; }
-    out_edges->Erase(out_edge);
-    out_instruction->mut_in_edges()->Erase(out_edge);
-    if (!out_instruction->in_edges().empty()) { continue; }
-    wait_instruction_list->MoveToDstBack(out_instruction, ready_list);
-  }
-}
-
-void VirtualMachine::__Init__(const VmDesc& vm_desc, ObjectMsgAllocator* allocator) {
-  mutable_vm_resource_desc()->CopyFrom(vm_desc.vm_resource_desc());
-  CHECK_GT(vm_desc.machine_id_range().size(), 0);
-  *mutable_machine_id_range() = vm_desc.machine_id_range();
-  set_vm_thread_only_allocator(allocator);
-  OBJECT_MSG_SKIPLIST_UNSAFE_FOR_EACH_PTR(&vm_desc.stream_type_id2desc(), stream_desc) {
-    if (stream_desc->num_threads() == 0) { continue; }
-    auto stream_rt_desc = ObjectMsgPtr<StreamRtDesc>::NewFrom(allocator, stream_desc);
-    mut_stream_type_id2stream_rt_desc()->Insert(stream_rt_desc.Mutable());
-    BalancedSplitter bs(stream_desc->parallel_num(), stream_desc->num_threads());
-    for (int64_t i = 0, rel_global_device_id = 0; i < stream_desc->num_threads(); ++i) {
-      auto thread_ctx = ObjectMsgPtr<ThreadCtx>::NewFrom(allocator, stream_rt_desc.Get());
-      mut_thread_ctx_list()->PushBack(thread_ctx.Mutable());
-      for (int j = bs.At(i).begin(); j < bs.At(i).end(); ++j, ++rel_global_device_id) {
-        StreamId stream_id;
-        stream_id.__Init__(stream_desc->stream_type_id(),
-                           this_start_global_device_id() + rel_global_device_id);
-        auto stream =
-            ObjectMsgPtr<Stream>::NewFrom(mut_allocator(), thread_ctx.Mutable(), stream_id,
-                                          vm_resource_desc().max_device_num_per_machine());
-        CHECK(stream_rt_desc->mut_stream_id2stream()->Insert(stream.Mutable()).second);
-        thread_ctx->mut_stream_list()->PushBack(stream.Mutable());
-      }
-    }
-  }
-}
-
-int64_t InstructionMaxRunningSeconds() { return 60 * 5; }
-
-Maybe<void> VirtualMachine::Receive(InstructionMsgList* compute_instr_msg_list) {
-  CHECK_OR_RETURN(!pthread_fork::IsForkedSubProcess())
-      << "Cannot run OneFlow in forked subprocess. Please add "
-         "'multiprocessing.set_start_method(\"spawn\")' in '__main__' if you are using Python's "
-         "multiprocessing";
-  InstructionMsgList new_instr_msg_list;
-  OBJECT_MSG_LIST_FOR_EACH_PTR(compute_instr_msg_list, compute_instr_msg) {
-    if (!compute_instr_msg->phy_instr_operand()) {
-      new_instr_msg_list.EmplaceBack(compute_instr_msg->MakeInferInstrMsg());
-    }
-    compute_instr_msg_list->MoveToDstBack(compute_instr_msg, &new_instr_msg_list);
-  }
-  const int64_t kHighWaterMark = GetInstructionHighWaterMark();
-  const int64_t kLowWaterMark = GetInstructionLowWaterMark();
-  if (*mut_flying_instruction_cnt() > kHighWaterMark) {
-    JUST(Global<ForeignLockHelper>::Get()->WithScopedRelease([&, this]() -> Maybe<void> {
-      const auto& NeedSpin = [&] { return *mut_flying_instruction_cnt() > kLowWaterMark; };
-      while (true) {
-        int64_t last_cnt = *mut_flying_instruction_cnt();
-        const auto& ret = TRY(SpinWaitUntilTimeout(NeedSpin, InstructionMaxRunningSeconds()));
-        if (ret.IsOk()) { break; }
-        CHECK_NE_OR_RETURN(last_cnt, *mut_flying_instruction_cnt())
-            << Error::UnimplementedError() << "The virtual machine don't respond in "
-            << InstructionMaxRunningSeconds() << " seconds.";
-      }
-      return Maybe<void>::Ok();
-    }));
-  }
-  mut_pending_msg_list()->MoveFrom(&new_instr_msg_list);
   return Maybe<void>::Ok();
 }
 
-Maybe<void> VirtualMachine::Receive(ObjectMsgPtr<InstructionMsg>&& compute_instr_msg) {
-  InstructionMsgList instr_msg_list;
-  instr_msg_list.EmplaceBack(std::move(compute_instr_msg));
-  return Receive(&instr_msg_list);
+void GetSchedulerThreadInitializer(std::function<void()>* Initializer) {
+  *Initializer = [&]() { OF_PROFILER_NAME_THIS_HOST_THREAD("_VM::Scheduler"); };
 }
 
-template<typename ContainerT>
-void VirtualMachine::TryRunFrontSeqInstruction(
-    ContainerT* front_seq_list, /*out*/ ReadyInstructionList* ready_instruction_list) {
-  auto* instruction = front_seq_list->Begin();
-  if (instruction == nullptr) { return; }
-  const auto& instr_type_id = instruction->instr_msg().instr_type_id();
-  const auto& instruction_type = instr_type_id.instruction_type();
-  if (!instruction_type.IsFrontSequential()) { return; }
-  if (!instruction->is_vm_stat_running_instruction_link_empty()) { return; }
-  const StreamType& stream_type = instr_type_id.stream_type_id().stream_type();
-  if (stream_type.SharingVirtualMachineThread()) {
-    stream_type.Run(this, instruction);
-    front_seq_list->Erase(instruction);
+void WorkerLoop(vm::ThreadCtx* thread_ctx, const std::function<void(vm::ThreadCtx*)>& Initializer) {
+  SyncVmModeGuard guard(SyncVmMode::kEnable);
+  Initializer(thread_ctx);
+  constexpr static size_t kExpireMicroseconds = 200;
+  while (thread_ctx->mut_notifier()->WaitAndClearNotifiedCnt() == kNotifierStatusSuccess) {
+    std::chrono::time_point<std::chrono::steady_clock> start{};
+    do {
+      while (thread_ctx->TryReceiveAndRun()) { start = std::chrono::steady_clock::now(); }
+      std::this_thread::yield();
+    } while (MicrosecondsFrom(start) < kExpireMicroseconds);
+  }
+}
+
+}  // namespace
+
+VirtualMachine::VirtualMachine()
+    : multi_thread_(ThreadLocalEnvBool<ONEFLOW_VM_MULTI_THREAD>()),
+      threads_closed_(false),
+      scheduler_stopped_(false) {
+  // Class VirtualMachineEngine only cares the basic logical of vm, while class VirtualMachine
+  // manages threads and condition variables.
+  // In order to notify threads in VirtualMachineEngine, a notify callback lambda should be take as
+  // an argument for VirtualMachineEngine's constructor.
+  engine_ = intrusive::make_shared<vm::VirtualMachineEngine>();
+  OF_PROFILER_NAME_THIS_HOST_THREAD("_Main");
+
+  if (multi_thread_) {
+    std::function<void()> SchedulerInitializer;
+    GetSchedulerThreadInitializer(&SchedulerInitializer);
+    schedule_thread_ = std::thread(&VirtualMachine::ScheduleLoop, this, SchedulerInitializer);
+  }
+  transport_dependence_.Reset();
+}
+
+namespace {
+
+Maybe<Symbol<Stream>> GetBarrierStream() {
+  auto device = JUST(Device::New("cpu"));
+  return Stream::New(device, StreamType::kBarrier);
+}
+
+void MakeBarrierInstructions(vm::InstructionList* list,
+                             const std::function<void()>& BarrierCallback) {
+  auto* vm = Singleton<VirtualMachine>::Get();
+  {
+    auto stream = CHECK_JUST(GetBarrierStream());
+    auto instruction = intrusive::make_shared<vm::Instruction>(
+        CHECK_JUST(vm->GetVmStream(stream)), std::make_shared<vm::GlobalSyncInstructionPolicy>());
+    list->EmplaceBack(std::move(instruction));
+  }
+  {
+    auto stream = CHECK_JUST(GetBarrierStream());
+    auto instruction = intrusive::make_shared<vm::Instruction>(
+        CHECK_JUST(vm->GetVmStream(stream)),
+        std::make_shared<vm::BarrierInstructionPolicy>(BarrierCallback));
+    list->EmplaceBack(std::move(instruction));
+  }
+}
+
+}  // namespace
+
+void VirtualMachine::ControlSync() {
+  auto bc = std::make_shared<BlockingCounter>(1);
+  vm::InstructionList list;
+  MakeBarrierInstructions(&list, [bc] { bc->Decrease(); });
+  CHECK_JUST(Receive(&list));
+  CHECK_JUST(bc->WaitUntilCntEqualZero(VirtualMachine::GetPredicatorNoMoreInstructionsFinished()));
+}
+
+Maybe<void> VirtualMachine::CloseVMThreads() {
+  CHECK_OR_RETURN(!threads_closed_) << "vm threads closed";
+  ControlSync();
+  pending_notifier_.Close();
+  if (multi_thread_) {
+    schedule_thread_.join();
   } else {
-    ready_instruction_list->EmplaceBack(std::move(instruction));
+    // For technical reasons, worker threads are always created even in single thread mode
+    JUST(CloseWorkerThreads());
   }
+  threads_closed_ = true;
+  return Maybe<void>::Ok();
 }
 
-void VirtualMachine::TryRunFrontSeqInstruction(ReadyInstructionList* ready_instruction_list) {
-  TryRunFrontSeqInstruction(mutable_front_seq_compute_instr_list(), ready_instruction_list);
+namespace {
+
+class SingleThreadScheduleCtx : public vm::ScheduleCtx {
+ public:
+  SingleThreadScheduleCtx() = default;
+  ~SingleThreadScheduleCtx() = default;
+
+  void OnWorkerLoadPending(vm::ThreadCtx* thread_ctx) const override {
+    while (thread_ctx->TryReceiveAndRun() > 0) {}
+  }
+};
+
+void ScheduleUntilVMEmpty(vm::VirtualMachineEngine* vm, const vm::ScheduleCtx& schedule_ctx) {
+  do { vm->Schedule(schedule_ctx); } while (!(vm->SchedulerEmpty()));
 }
 
-void VirtualMachine::TryDeleteLogicalObjects() {
-  auto* delete_list = mut_delete_logical_object_list();
-  // OBJECT_MSG_LIST_FOR_EACH_PTR supports removing elements at the end of iteration code
-  OBJECT_MSG_LIST_FOR_EACH_PTR(delete_list, logical_object) {
-    auto* global_device_id2mirrored_object = logical_object->mut_global_device_id2mirrored_object();
-    OBJECT_MSG_MAP_FOR_EACH_PTR(global_device_id2mirrored_object, mirrored_object) {
-      CHECK_EQ(mirrored_object->ref_cnt(), 1);
-      if (mirrored_object->rw_mutexed_object().ref_cnt() == 1) {
-        CHECK_EQ(mirrored_object->rw_mutexed_object().access_list().size(), 0);
-        // TODO(lixinqi) fix the bug occured when uncommenting the next line
-        // CHECK(!mirrored_object->rw_mutexed_object().has_object());
-      }
-      // `mirrored_object' is deleted by erasing
-      global_device_id2mirrored_object->Erase(mirrored_object);
+}  // namespace
+
+Maybe<void> VirtualMachine::BlockingRunProbeFunc(
+    const std::function<bool(vm::VirtualMachineEngine*)>& prob_func) {
+  JUST(Singleton<ForeignLockHelper>::Get()->WithScopedRelease([&, this]() -> Maybe<void> {
+    auto bc = std::make_shared<BlockingCounter>(1);
+    engine_->InsertProbe([bc, prob_func](vm::VirtualMachineEngine* engine) {
+      if (!prob_func(engine)) { return false; }
+      bc->Decrease();
+      return true;
+    });
+    if (threads_closed_ || !multi_thread_) {
+      ScheduleUntilVMEmpty(engine_.Mutable(), SingleThreadScheduleCtx());
+    } else {
+      pending_notifier_.Notify();
     }
-    mut_id2logical_object()->Erase(logical_object);
-    CHECK_EQ(logical_object->ref_cnt(), 1);
-    // `logical_object' is deleted by erasing
-    delete_list->Erase(logical_object);
+    JUST(bc->WaitUntilCntEqualZero(VirtualMachine::GetPredicatorNoMoreInstructionsFinished()));
+    return Maybe<void>::Ok();
+  }));
+  return Maybe<void>::Ok();
+}
+
+Maybe<void> VirtualMachine::ShrinkAllMem() {
+  auto try_shrink_men = [](vm::VirtualMachineEngine* engine) -> bool {
+    if (engine->mut_active_stream_list()->size()) { return false; }
+    INTRUSIVE_FOR_EACH_PTR(thread_ctx, engine->mut_thread_ctx_list()) {
+      INTRUSIVE_FOR_EACH_PTR(stream, thread_ctx->mut_stream_list()) {
+        vm::Allocator* allocator = stream->mut_stream_policy()->mut_allocator();
+        if (allocator) {
+          auto* cache = dynamic_cast<vm::CachingAllocator*>(allocator);
+          if (cache != nullptr) { cache->Shrink(); }
+        }
+      }
+    }
+    return true;
+  };
+  return BlockingRunProbeFunc(try_shrink_men);
+}
+
+VirtualMachine::~VirtualMachine() {
+  if (!threads_closed_) { CHECK_JUST(CloseVMThreads()); }
+  RunMainThreadPendingTasks();
+  CHECK(engine_->SchedulerEmpty());
+  engine_.Reset();
+}
+
+std::function<Maybe<bool>()> VirtualMachine::GetPredicatorNoMoreInstructionsFinished() {
+  auto last_total_erased = std::make_shared<size_t>(0);
+  auto* vm = Singleton<VirtualMachine>::Get();
+  if (vm != nullptr) { *last_total_erased = vm->engine_->total_erased_instruction_cnt(); }
+  return [last_total_erased]() -> Maybe<bool> {
+    auto* vm = Singleton<VirtualMachine>::Get();
+    CHECK_NOTNULL_OR_RETURN(vm) << "virtual machine not initialized.";
+    CHECK_OR_RETURN(!vm->NoMoreErasedInstructions(last_total_erased.get()))
+        << "blocking instructions\n"
+        << vm->GetBlockingDebugString();
+    return false;
+  };
+}
+
+bool VirtualMachine::NoMoreErasedInstructions(size_t* last_total_erased_instruction_cnt) const {
+  size_t cnt = engine_->total_erased_instruction_cnt();
+  bool no_more_erased = (*last_total_erased_instruction_cnt == cnt);
+  *last_total_erased_instruction_cnt = cnt;
+  return no_more_erased;
+}
+
+std::string VirtualMachine::GetBlockingDebugString() {
+  size_t limit = EnvInteger<ONEFLOW_VM_BLOCKING_DEBUG_INSTRUCTIONS_DISPLAY_LIMIT>();
+  return engine_->GetLivelyInstructionListDebugString(limit);
+}
+
+void VirtualMachine::RunMainThreadPendingTasks() {
+  std::unique_lock lock(main_thread_pending_tasks_mutex_);
+  for (const auto& main_thread_pending_task : main_thread_pending_tasks_) {
+    main_thread_pending_task();
   }
+  main_thread_pending_tasks_.clear();
 }
 
-void VirtualMachine::Schedule() {
-  ReadyInstructionList* ready_instruction_list = mut_ready_instruction_list();
-  auto* active_stream_list = mut_active_stream_list();
-  OBJECT_MSG_LIST_FOR_EACH_PTR(active_stream_list, stream) {
-    TryReleaseFinishedInstructions(stream, /*out*/ ready_instruction_list);
-    if (stream->running_instruction_list().empty()) { active_stream_list->Erase(stream); }
+Maybe<void> VirtualMachine::Receive(vm::InstructionList* instruction_list) {
+  SyncVmModeGuard guard(SyncVmMode::kEnable);
+  RunMainThreadPendingTasks();
+  if (unlikely(pthread_fork::IsForkedSubProcess())) {
+    INTRUSIVE_FOR_EACH_PTR(instruction, instruction_list) {
+      const auto& device = instruction->stream().device();
+      CHECK_OR_RETURN(device->enum_type() == DeviceType::kCPU)
+          << pthread_fork::kOfCudaNotSupportInForkedSubProcess;
+      JUST(instruction->Prepare());
+      instruction->Compute();
+    }
+    instruction_list->Clear();
+  } else if (unlikely(threads_closed_ || !multi_thread_)) {
+    JUST(RunInCurrentThread(instruction_list));
+  } else {
+    const int64_t kHighWaterMark = GetInstructionHighWaterMark();
+    if (engine_->flying_instruction_cnt() > kHighWaterMark) {
+      JUST(Singleton<ForeignLockHelper>::Get()->WithScopedRelease([&, this]() -> Maybe<void> {
+        auto bc = std::make_shared<BlockingCounter>(1);
+        engine_->InsertProbe([bc](vm::VirtualMachineEngine* engine) {
+          const int64_t kLowWaterMark = GetInstructionLowWaterMark();
+          if (engine->flying_instruction_cnt() > kLowWaterMark) { return false; }
+          bc->Decrease();
+          return true;
+        });
+        pending_notifier_.Notify();
+        JUST(bc->WaitUntilCntEqualZero(VirtualMachine::GetPredicatorNoMoreInstructionsFinished()));
+        return Maybe<void>::Ok();
+      }));
+    }
+    if (JUST(engine_->Receive(instruction_list))) {
+      // old scheduler_pending_instruction_list is empty.
+      pending_notifier_.Notify();
+    }
   }
-  TryDeleteLogicalObjects();
-  TryRunFrontSeqInstruction(/*out*/ ready_instruction_list);
-  auto* waiting_instruction_list = mut_waiting_instruction_list();
-  // Using thread_unsafe_size to avoid acquiring mutex lock.
-  // The inconsistency between pending_msg_list.list_head_.list_head_.container_ and
-  // pending_msg_list.list_head_.list_head_.size_ is not a fatal error because
-  // VirtualMachine::Schedule is always in a buzy loop. All instructions will get handled
-  // eventually.
-  //  VirtualMachine::Receive may be less effiencient if the thread safe version
-  //  `pending_msg_list().size()` used here, because VirtualMachine::Schedule is more likely to get
-  //  the mutex lock.
-  if (pending_msg_list().thread_unsafe_size() > 0) {
-    TmpPendingInstrMsgList tmp_pending_msg_list;
-    mut_pending_msg_list()->MoveTo(&tmp_pending_msg_list);
-    FilterAndRunInstructionsInAdvance(&tmp_pending_msg_list);
-    NewInstructionList new_instruction_list;
-    MakeInstructions(&tmp_pending_msg_list, /*out*/ &new_instruction_list);
-    ConsumeMirroredObjects(mut_id2logical_object(), &new_instruction_list);
-    FilterReadyInstructions(&new_instruction_list, /*out*/ ready_instruction_list);
-    new_instruction_list.MoveTo(waiting_instruction_list);
+  return Maybe<void>::Ok();
+}
+
+Maybe<void> VirtualMachine::NotifyOrRunScheduler() {
+  if (unlikely(pthread_fork::IsForkedSubProcess() || threads_closed_ || !multi_thread_)) {
+    ScheduleUntilVMEmpty(engine_.Mutable(), SingleThreadScheduleCtx());
+  } else {
+    pending_notifier_.Notify();
   }
-  DispatchAndPrescheduleInstructions(ready_instruction_list);
-  *mut_flying_instruction_cnt() = mut_waiting_instruction_list()->size()
-                                  + mut_ready_instruction_list()->size()
-                                  + mutable_vm_stat_running_instruction_list()->size();
+  return Maybe<void>::Ok();
 }
 
-bool VirtualMachine::ThreadUnsafeEmpty() const {
-  return pending_msg_list().thread_unsafe_size() == 0 && waiting_instruction_list().empty()
-         && active_stream_list().empty() && front_seq_compute_instr_list().empty()
-         && flying_instruction_cnt() == 0;
+Maybe<void> VirtualMachine::CloseWorkerThreads() {
+  JUST(ForEachThreadCtx(engine_.Mutable(), [&](vm::ThreadCtx* thread_ctx) -> Maybe<void> {
+    thread_ctx->mut_notifier()->Close();
+    return Maybe<void>::Ok();
+  }));
+  {
+    std::unique_lock<std::mutex> lock(worker_threads_mutex_);
+    for (const auto& worker_thread : worker_threads_) { worker_thread->join(); }
+  }
+  return Maybe<void>::Ok();
 }
 
-bool VirtualMachine::Empty() const {
-  return pending_msg_list().empty() && waiting_instruction_list().empty()
-         && active_stream_list().empty() && front_seq_compute_instr_list().empty()
-         && flying_instruction_cnt() == 0;
+Maybe<void> VirtualMachine::RunInCurrentThread(vm::InstructionList* instr_list) {
+  CHECK_OR_RETURN(engine_->SchedulerEmpty())
+      << "vm scheduler not empty. May be a fatal error occured";
+  JUST(engine_->Receive(instr_list));
+  ScheduleUntilVMEmpty(engine_.Mutable(), SingleThreadScheduleCtx());
+  return Maybe<void>::Ok();
 }
 
-}  // namespace vm
+namespace {
+
+class MultiThreadScheduleCtx : public vm::ScheduleCtx {
+ public:
+  MultiThreadScheduleCtx() = default;
+  ~MultiThreadScheduleCtx() = default;
+
+  void OnWorkerLoadPending(vm::ThreadCtx* thread_ctx) const override {
+    thread_ctx->mut_notifier()->Notify();
+  }
+};
+
+}  // namespace
+
+void VirtualMachine::ScheduleLoop(const std::function<void()>& Initializer) {
+  SyncVmModeGuard guard(SyncVmMode::kEnable);
+  Initializer();
+  MultiThreadScheduleCtx schedule_ctx{};
+  while (pending_notifier_.WaitAndClearNotifiedCnt() == kNotifierStatusSuccess) {
+    OF_PROFILER_RANGE_GUARD("VirtualMachine::ScheduleLoop");
+    auto start = std::chrono::steady_clock::now();
+    static constexpr int kWorkingMicroseconds = 1000;
+    // Every time this thread wakes up, engine_ is scheduled for about `kWorkingMicroseconds`.
+    // The cost of os thread switching is about 5-10 microseconds. Doing more scheduling in
+    // a single waiting up can reach higher performance.
+    do {
+      // Use SchedulerThreadUnsafeEmpty to avoid acquiring mutex lock.
+      // It's safe to use SchedulerThreadUnsafeEmpty here. pending_notifier_.notified_cnt_ will be
+      // greater than zero when inconsistency between
+      // engine_->pending_instruction_list.list_head_.list_head_.container_ and
+      // engine_->pending_instruction_list.list_head_.list_head_.size_ occured. hence the pending
+      // instructions
+      // will get handled in the next iteration.
+      //  VirtualMachine::Receive may be less effiencient if the thread safe version
+      //  `engine_->SchedulerEmpty()`
+      // used
+      //  here, because VirtualMachine::ScheduleLoop is more likely to get the mutex lock.
+      do {
+        const size_t total_inserted = engine_->total_inserted_instruction_cnt();
+        const size_t total_erased = engine_->total_erased_instruction_cnt();
+        engine_->Schedule(schedule_ctx);
+        if (ThreadLocalEnvBool<ONEFLOW_VM_ENABLE_SCHEDULE_YIELD>()
+            && total_inserted == engine_->total_inserted_instruction_cnt()
+            && total_erased == engine_->total_erased_instruction_cnt()) {  // nothing handled.
+          std::this_thread::yield();
+        }
+      } while (!engine_->SchedulerThreadUnsafeEmpty());
+    } while (MicrosecondsFrom(start) < kWorkingMicroseconds);
+  }
+  ScheduleUntilVMEmpty(engine_.Mutable(), schedule_ctx);
+  CHECK_JUST(CloseWorkerThreads());
+  scheduler_stopped_ = true;
+}
+
+intrusive::shared_ptr<vm::Dependence> VirtualMachine::FindOrCreateScheduleDependence(
+    Symbol<Stream> stream) {
+  std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+  intrusive::shared_ptr<vm::Dependence>* ptr = &stream2dependence_[stream];
+  if (!*ptr) { *ptr = intrusive::make_shared<vm::Dependence>(); }
+  return *ptr;
+}
+
+intrusive::shared_ptr<vm::Dependence> VirtualMachine::FindOrCreateTransportLocalDepObject() {
+  std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+  if (!transport_dependence_) { transport_dependence_ = intrusive::make_shared<vm::Dependence>(); }
+  return transport_dependence_;
+}
+
+Maybe<vm::Stream*> VirtualMachine::CreateStream(Symbol<Stream> stream) {
+  std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+  vm::ThreadCtx* thread_ctx =
+      JUST(FindOrCreateThreadCtx(stream->device(), stream->stream_type(), stream->thread_uid()));
+  return JUST(CreateStream(thread_ctx, stream));
+}
+
+Maybe<vm::Stream*> VirtualMachine::GetVmStream(Symbol<Stream> stream) {
+  if (stream->unique_stream_id() >= unique_stream_id2vm_stream_.size()) {
+    std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+    if (stream->unique_stream_id() >= unique_stream_id2vm_stream_.size()) {
+      auto* stream_mgr = JUST(SingletonMaybe<StreamMgr>());
+      for (int i = unique_stream_id2vm_stream_.size(); i <= stream->unique_stream_id(); ++i) {
+        Symbol<Stream> cur_stream = JUST(stream_mgr->GetStreamSymbol(i));
+        CHECK_EQ_OR_RETURN(cur_stream->unique_stream_id(), i)
+            << "invalid Stream::unique_stream_id()";
+        unique_stream_id2vm_stream_.SetOrAdd(cur_stream->unique_stream_id(),
+                                             JUST(CreateStream(cur_stream)));
+      }
+    }
+  }
+  return JUST(VectorAt(unique_stream_id2vm_stream_, stream->unique_stream_id()));
+}
+
+Maybe<vm::ThreadCtx*> VirtualMachine::FindOrCreateThreadCtx(Symbol<Device> device,
+                                                            StreamType stream_type,
+                                                            size_t thread_uid) {
+  std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+  vm::ThreadCtx** thread_ctx_ptr = nullptr;
+  if (StreamOnIndependentThread::Visit(stream_type)) {
+    auto key = std::make_pair(device->enum_type(), stream_type);
+    thread_ctx_ptr = &devcie_type_stream_type_2independent_thread_ctx_[key];
+  } else {
+    thread_ctx_ptr = &thread_uid2shared_thread_ctx_[thread_uid];
+  }
+  if (*thread_ctx_ptr == nullptr) {
+    *thread_ctx_ptr = JUST(CreateThreadCtx(device, stream_type, thread_uid));
+  }
+  return *thread_ctx_ptr;
+}
+
+Maybe<vm::ThreadCtx*> VirtualMachine::CreateThreadCtx(Symbol<Device> device, StreamType stream_type,
+                                                      size_t thread_uid) {
+  std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+  // thread_ctx_ptr may be used after timout.
+  auto thread_ctx_ptr = std::make_shared<vm::ThreadCtx*>(nullptr);
+  {
+    auto bc = std::make_shared<BlockingCounter>(1);
+    engine_->InsertProbe([thread_ctx_ptr, bc](vm::VirtualMachineEngine* engine) {
+      auto thread_ctx = intrusive::make_shared<vm::ThreadCtx>();
+      engine->mut_thread_ctx_list()->PushBack(thread_ctx.Mutable());
+      *thread_ctx_ptr = thread_ctx.Mutable();
+      bc->Decrease();
+      return true;
+    });
+    JUST(NotifyOrRunScheduler());
+    JUST(bc->WaitUntilCntEqualZero(VirtualMachine::GetPredicatorNoMoreInstructionsFinished()));
+  }
+  auto* thread_ctx = *thread_ctx_ptr;
+  {
+    const std::string thread_tag = [&] {
+      std::string device_tag = *CHECK_JUST(DeviceTag4DeviceType(device->enum_type()));
+      if (StreamOnIndependentThread::Visit(stream_type)) {
+        return device_tag + GetStreamTypeName::Visit(stream_type);
+      } else {
+        return std::to_string(thread_uid);
+      }
+    }();
+    const auto& WorkerInitializer = [thread_tag](vm::ThreadCtx* thread_ctx) {
+      OF_PROFILER_NAME_THIS_HOST_THREAD("_VM::Worker_" + thread_tag);
+    };
+    auto thread = std::make_unique<std::thread>(&WorkerLoop, thread_ctx, WorkerInitializer);
+    {
+      std::unique_lock<std::mutex> lock(worker_threads_mutex_);
+      worker_threads_.push_back(std::move(thread));
+    }
+  }
+  return thread_ctx;
+}
+
+Maybe<vm::Stream*> VirtualMachine::CreateStream(vm::ThreadCtx* thread_ctx, Symbol<Stream> stream) {
+  std::unique_lock<std::recursive_mutex> lock(stream_and_thread_ctx_mutex_);
+  intrusive::shared_ptr<vm::Dependence> schedule_dependence =
+      FindOrCreateScheduleDependence(stream);
+  std::vector<intrusive::shared_ptr<vm::Dependence>> transport_dependences{};
+  if (IsCommNetStream::Visit(stream->stream_type())) {
+    transport_dependences.push_back(FindOrCreateTransportLocalDepObject());
+  }
+  auto vm_stream =
+      intrusive::make_shared<vm::Stream>(thread_ctx, stream->device(), stream->stream_type(),
+                                         schedule_dependence, transport_dependences);
+
+  auto bc = std::make_shared<BlockingCounter>(1);
+  engine_->InsertProbe([&vm_stream, thread_ctx, bc](vm::VirtualMachineEngine* engine) {
+    thread_ctx->mut_stream_list()->PushBack(vm_stream.Mutable());
+    bc->Decrease();
+    return true;
+  });
+  JUST(NotifyOrRunScheduler());
+  JUST(bc->WaitUntilCntEqualZero(VirtualMachine::GetPredicatorNoMoreInstructionsFinished()));
+  return vm_stream.Mutable();
+}
+
 }  // namespace oneflow

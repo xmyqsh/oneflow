@@ -14,19 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include "oneflow/core/common/error.h"
 #include "oneflow/core/kernel/kernel.h"
 #include "oneflow/core/common/tensor_buffer.h"
 #include "oneflow/core/common/channel.h"
 #include "oneflow/core/common/blocking_counter.h"
+#include "oneflow/core/profiler/profiler.h"
 #include "oneflow/user/image/random_crop_generator.h"
+#include "oneflow/user/image/jpeg_decoder.h"
 #include <opencv2/opencv.hpp>
 
-#if defined(WITH_CUDA) && CUDA_VERSION >= 10020
+#ifdef WITH_CUDA
+
+#include <cuda.h>
+
+#if CUDA_VERSION >= 10020
+
+#define WITH_NVJPEG
 
 #include <nvjpeg.h>
 #include <npp.h>
 
-#endif
+#endif  // CUDA_VERSION >= 10020
+
+#endif  // WITH_CUDA
 
 namespace oneflow {
 
@@ -64,7 +75,8 @@ class ROIGenerator {
 
 class RandomCropROIGenerator : public ROIGenerator {
  public:
-  RandomCropROIGenerator(RandomCropGenerator* crop_generator) : crop_generator_(crop_generator) {}
+  explicit RandomCropROIGenerator(RandomCropGenerator* crop_generator)
+      : crop_generator_(crop_generator) {}
   ~RandomCropROIGenerator() override = default;
 
   void Generate(int width, int height, ROI* roi) const override {
@@ -137,11 +149,24 @@ class CpuDecodeHandle final : public DecodeHandle {
   }
 };
 
-void CpuDecodeHandle::DecodeRandomCropResize(const unsigned char* data, size_t length,
-                                             RandomCropGenerator* crop_generator,
-                                             unsigned char* workspace, size_t workspace_size,
-                                             unsigned char* dst, int target_width,
-                                             int target_height) {
+bool CpuJpegDecodeRandomCropResize(const unsigned char* data, size_t length,
+                                   RandomCropGenerator* crop_generator, unsigned char* workspace,
+                                   size_t workspace_size, unsigned char* dst, int target_width,
+                                   int target_height) {
+  cv::Mat image_mat;
+  if (JpegPartialDecodeRandomCropImage(data, length, crop_generator, workspace, workspace_size,
+                                       &image_mat)) {
+    return false;
+  }
+
+  cv::Mat dst_mat(target_height, target_width, CV_8UC3, dst, cv::Mat::AUTO_STEP);
+  cv::resize(image_mat, dst_mat, cv::Size(target_width, target_height), 0, 0, cv::INTER_LINEAR);
+  return true;
+}
+
+void OpencvDecodeRandomCropResize(const unsigned char* data, size_t length,
+                                  RandomCropGenerator* crop_generator, unsigned char* dst,
+                                  int target_width, int target_height) {
   cv::Mat image =
       cv::imdecode(cv::Mat(1, length, CV_8UC1, const_cast<unsigned char*>(data)), cv::IMREAD_COLOR);
   cv::Mat cropped;
@@ -159,13 +184,26 @@ void CpuDecodeHandle::DecodeRandomCropResize(const unsigned char* data, size_t l
   cv::cvtColor(resized, dst_mat, cv::COLOR_BGR2RGB);
 }
 
+void CpuDecodeHandle::DecodeRandomCropResize(const unsigned char* data, size_t length,
+                                             RandomCropGenerator* crop_generator,
+                                             unsigned char* workspace, size_t workspace_size,
+                                             unsigned char* dst, int target_width,
+                                             int target_height) {
+  if (CpuJpegDecodeRandomCropResize(data, length, crop_generator, workspace, workspace_size, dst,
+                                    target_width, target_height)) {
+    return;
+  }
+
+  OpencvDecodeRandomCropResize(data, length, crop_generator, dst, target_width, target_height);
+}
+
 template<>
 DecodeHandleFactory CreateDecodeHandleFactory<DeviceType::kCPU>(int target_width,
                                                                 int target_height) {
   return []() -> std::shared_ptr<DecodeHandle> { return std::make_shared<CpuDecodeHandle>(); };
 }
 
-#if defined(WITH_CUDA) && CUDA_VERSION >= 10020
+#if defined(WITH_NVJPEG)
 
 int GpuDeviceMalloc(void** p, size_t s) { return (int)cudaMalloc(p, s); }
 
@@ -186,7 +224,7 @@ void InitNppStreamContext(NppStreamContext* ctx, int dev, cudaStream_t stream) {
                                        cudaDevAttrMaxThreadsPerMultiProcessor, dev));
   OF_CUDA_CHECK(
       cudaDeviceGetAttribute(&ctx->nMaxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, dev));
-  int smem_per_block;
+  int smem_per_block = 0;
   OF_CUDA_CHECK(cudaDeviceGetAttribute(&smem_per_block, cudaDevAttrMaxSharedMemoryPerBlock, dev));
   ctx->nSharedMemPerBlock = smem_per_block;
   OF_CUDA_CHECK(cudaDeviceGetAttribute(&ctx->nCudaDevAttrComputeCapabilityMajor,
@@ -231,7 +269,7 @@ class GpuDecodeHandle final : public DecodeHandle {
   nvjpegDevAllocator_t dev_allocator_{};
   nvjpegPinnedAllocator_t pinned_allocator_{};
   CpuDecodeHandle fallback_handle_;
-  unsigned char* fallback_buffer_;
+  unsigned char* fallback_buffer_{};
   size_t fallback_buffer_size_;
   bool warmup_done_;
   bool use_hardware_acceleration_;
@@ -290,10 +328,10 @@ void GpuDecodeHandle::DecodeRandomCrop(const unsigned char* data, size_t length,
                                        size_t dst_max_length, int* dst_width, int* dst_height) {
   // https://docs.nvidia.com/cuda/archive/10.2/nvjpeg/index.html#nvjpeg-decoupled-decode-api
   OF_NVJPEG_CHECK(nvjpegJpegStreamParse(jpeg_handle_, data, length, 0, 0, jpeg_stream_));
-  unsigned int orig_width;
-  unsigned int orig_height;
+  unsigned int orig_width = 0;
+  unsigned int orig_height = 0;
   OF_NVJPEG_CHECK(nvjpegJpegStreamGetFrameDimensions(jpeg_stream_, &orig_width, &orig_height));
-  ROI roi;
+  ROI roi{};
   roi_generator->Generate(static_cast<int>(orig_width), static_cast<int>(orig_height), &roi);
   CHECK_LE(roi.w * roi.h * kNumChannels, dst_max_length);
   nvjpegImage_t image;
@@ -301,8 +339,8 @@ void GpuDecodeHandle::DecodeRandomCrop(const unsigned char* data, size_t length,
   image.pitch[0] = roi.w * kNumChannels;
   OF_NVJPEG_CHECK(nvjpegDecodeParamsSetOutputFormat(jpeg_decode_params_, NVJPEG_OUTPUT_RGBI));
 
-  nvjpegJpegDecoder_t jpeg_decoder;
-  nvjpegJpegState_t jpeg_state;
+  nvjpegJpegDecoder_t jpeg_decoder = nullptr;
+  nvjpegJpegState_t jpeg_state = nullptr;
   int is_hardware_acceleration_supported = -1;
   if (use_hardware_acceleration_) {
     nvjpegDecoderJpegSupported(hw_jpeg_decoder_, jpeg_stream_, jpeg_decode_params_,
@@ -318,6 +356,8 @@ void GpuDecodeHandle::DecodeRandomCrop(const unsigned char* data, size_t length,
   if (roi.x != 0 || roi.y != 0 || roi.w != orig_width || roi.h != orig_height) {
     // hardware_acceleration not support nvjpegDecodeParamsSetROI
     OF_NVJPEG_CHECK(nvjpegDecodeParamsSetROI(jpeg_decode_params_, roi.x, roi.y, roi.w, roi.h));
+  } else {
+    OF_NVJPEG_CHECK(nvjpegDecodeParamsSetROI(jpeg_decode_params_, 0, 0, -1, -1));
   }
   OF_NVJPEG_CHECK(nvjpegStateAttachPinnedBuffer(jpeg_state, jpeg_pinned_buffer_));
   OF_NVJPEG_CHECK(nvjpegStateAttachDeviceBuffer(jpeg_state, jpeg_device_buffer_));
@@ -341,7 +381,7 @@ void GpuDecodeHandle::Decode(const unsigned char* data, size_t length, unsigned 
 void GpuDecodeHandle::CropResize(const unsigned char* src, int src_width, int src_height,
                                  ROIGenerator* roi_generator, unsigned char* dst, int dst_width,
                                  int dst_height) {
-  ROI roi;
+  ROI roi{};
   roi_generator->Generate(static_cast<int>(src_width), static_cast<int>(src_height), &roi);
   const NppiSize src_size{
       .width = src_width,
@@ -374,12 +414,12 @@ void GpuDecodeHandle::DecodeRandomCropResize(const unsigned char* data, size_t l
                                              unsigned char* workspace, size_t workspace_size,
                                              unsigned char* dst, int target_width,
                                              int target_height) {
-  int width;
-  int height;
-  nvjpegChromaSubsampling_t subsampling;
-  int num_components;
-  nvjpegStatus_t status = nvjpegGetImageInfo(jpeg_handle_, data, length, &num_components,
-                                             &subsampling, &width, &height);
+  int width[NVJPEG_MAX_COMPONENT];
+  int height[NVJPEG_MAX_COMPONENT];
+  nvjpegChromaSubsampling_t subsampling{};
+  int num_components = 0;
+  nvjpegStatus_t status =
+      nvjpegGetImageInfo(jpeg_handle_, data, length, &num_components, &subsampling, width, height);
   if (status != NVJPEG_STATUS_SUCCESS) {
     CHECK_LE(target_width * target_height * kNumChannels, fallback_buffer_size_);
     fallback_handle_.DecodeRandomCropResize(data, length, crop_generator, nullptr, 0,
@@ -392,15 +432,15 @@ void GpuDecodeHandle::DecodeRandomCropResize(const unsigned char* data, size_t l
   NoChangeROIGenerator no_change_roi_generator;
   RandomCropROIGenerator random_crop_roi_generator(crop_generator);
   if (use_hardware_acceleration_) {
-    DecodeRandomCrop(data, length, &no_change_roi_generator, workspace, workspace_size, &width,
-                     &height);
-    CropResize(workspace, width, height, &random_crop_roi_generator, dst, target_width,
-               target_height);
+    int w = 0;
+    int h = 0;
+    DecodeRandomCrop(data, length, &no_change_roi_generator, workspace, workspace_size, &w, &h);
+    CropResize(workspace, w, h, &random_crop_roi_generator, dst, target_width, target_height);
   } else {
-    DecodeRandomCrop(data, length, &random_crop_roi_generator, workspace, workspace_size, &width,
-                     &height);
-    CropResize(workspace, width, height, &no_change_roi_generator, dst, target_width,
-               target_height);
+    int w = 0;
+    int h = 0;
+    DecodeRandomCrop(data, length, &random_crop_roi_generator, workspace, workspace_size, &w, &h);
+    CropResize(workspace, w, h, &no_change_roi_generator, dst, target_width, target_height);
   }
 }
 
@@ -411,11 +451,11 @@ void GpuDecodeHandle::WarmupOnce(int warmup_size, unsigned char* workspace, size
   cv::randu(image, cv::Scalar(0, 0, 0), cv::Scalar(255, 255, 255));
   std::vector<unsigned char> data;
   cv::imencode(".jpg", image, data, {});
-  int decoded_width;
-  int decoded_height;
+  int decoded_width = 0;
+  int decoded_height = 0;
   Decode(data.data(), data.size(), workspace, workspace_size, &decoded_width, &decoded_height);
   Synchronize();
-  if (use_hardware_acceleration_ == true) {
+  if (use_hardware_acceleration_) {
     // Note(guoran): hardware acceleration jpeg decoder support baseline decoding only, use
     // progressive to warmup jpeg decoder.
     cv::imencode(".jpg", image, data, {cv::IMWRITE_JPEG_PROGRESSIVE, 1});
@@ -428,9 +468,9 @@ void GpuDecodeHandle::WarmupOnce(int warmup_size, unsigned char* workspace, size
 void GpuDecodeHandle::Synchronize() { OF_CUDA_CHECK(cudaStreamSynchronize(cuda_stream_)); }
 
 template<>
-DecodeHandleFactory CreateDecodeHandleFactory<DeviceType::kGPU>(int target_width,
-                                                                int target_height) {
-  int dev;
+DecodeHandleFactory CreateDecodeHandleFactory<DeviceType::kCUDA>(int target_width,
+                                                                 int target_height) {
+  int dev = 0;
   OF_CUDA_CHECK(cudaGetDevice(&dev));
   return [dev, target_width, target_height]() -> std::shared_ptr<DecodeHandle> {
     OF_CUDA_CHECK(cudaSetDevice(dev));
@@ -438,7 +478,7 @@ DecodeHandleFactory CreateDecodeHandleFactory<DeviceType::kGPU>(int target_width
   };
 }
 
-#endif
+#endif  // defined(WITH_NVJPEG)
 
 class Worker final {
  public:
@@ -461,6 +501,7 @@ class Worker final {
 
   void PollWork(const std::function<std::shared_ptr<DecodeHandle>()>& handle_factory,
                 int target_width, int target_height, int warmup_size) {
+    OF_PROFILER_NAME_THIS_HOST_THREAD("_cuda_img_decode");
     std::shared_ptr<DecodeHandle> handle = handle_factory();
     std::shared_ptr<Work> work;
     while (true) {
@@ -492,7 +533,7 @@ class ImageDecoderRandomCropResizeKernel final : public Kernel {
 
  private:
   void VirtualKernelInit(KernelContext* ctx) override;
-  void ForwardDataContent(const KernelContext* ctx) const override;
+  void ForwardDataContent(KernelContext* ctx) const override;
 
   std::vector<std::unique_ptr<RandomCropGenerator>> random_crop_generators_;
   std::vector<std::unique_ptr<Worker>> workers_;
@@ -529,8 +570,7 @@ void ImageDecoderRandomCropResizeKernel<device_type>::VirtualKernelInit(KernelCo
 }
 
 template<DeviceType device_type>
-void ImageDecoderRandomCropResizeKernel<device_type>::ForwardDataContent(
-    const KernelContext* ctx) const {
+void ImageDecoderRandomCropResizeKernel<device_type>::ForwardDataContent(KernelContext* ctx) const {
   const ImageDecoderRandomCropResizeOpConf& conf =
       this->op_conf().image_decoder_random_crop_resize_conf();
   const Blob* in = ctx->BnInOp2Blob("in");
@@ -577,7 +617,7 @@ void ImageDecoderRandomCropResizeKernel<device_type>::ForwardDataContent(
     work->task_counter = task_counter;
     workers_.at(worker_id)->Enqueue(work);
   }
-  done_counter->WaitUntilCntEqualZero();
+  done_counter->WaitForeverUntilCntEqualZero();
 }
 
 NEW_REGISTER_KERNEL(OperatorConf::kImageDecoderRandomCropResizeConf,
@@ -586,14 +626,14 @@ NEW_REGISTER_KERNEL(OperatorConf::kImageDecoderRandomCropResizeConf,
       return conf.op_attribute().op_conf().device_tag() == "cpu";
     });
 
-#if defined(WITH_CUDA) && CUDA_VERSION >= 10020
+#if defined(WITH_NVJPEG)
 
 NEW_REGISTER_KERNEL(OperatorConf::kImageDecoderRandomCropResizeConf,
-                    ImageDecoderRandomCropResizeKernel<DeviceType::kGPU>)
+                    ImageDecoderRandomCropResizeKernel<DeviceType::kCUDA>)
     .SetIsMatchedPred([](const KernelConf& conf) -> bool {
-      return conf.op_attribute().op_conf().device_tag() == "gpu";
+      return conf.op_attribute().op_conf().device_tag() == "cuda";
     });
 
-#endif
+#endif  // defined(WITH_NVJPEG)
 
 }  // namespace oneflow

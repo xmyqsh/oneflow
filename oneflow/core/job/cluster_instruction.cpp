@@ -53,7 +53,7 @@ class ObsoleteCtrlKeys {
   }
   void Add(const std::string& key) {
     std::unique_lock<std::mutex> lck(mutex_);
-    keys_.push_back(key);
+    keys_.emplace_back(key);
   }
 
  private:
@@ -61,33 +61,33 @@ class ObsoleteCtrlKeys {
   std::vector<std::string> keys_;
 };
 
-COMMAND(Global<ObsoleteCtrlKeys>::SetAllocated(new ObsoleteCtrlKeys()));
+COMMAND(Singleton<ObsoleteCtrlKeys>::SetAllocated(new ObsoleteCtrlKeys()));
 
 void OccasionallyClearCtrlKV(const std::string& key) {
   static std::atomic<int64_t> seq(0LL);
   const static int64_t interval = 65536;
-  Global<ObsoleteCtrlKeys>::Get()->Add(key);
+  Singleton<ObsoleteCtrlKeys>::Get()->Add(key);
   // 1 instead of 0 is better for avoid clearing no ctrl kv
   if ((seq++) % interval == 1) {
     OF_ENV_BARRIER();
     if (GlobalProcessCtx::IsThisProcessMaster()) {
-      Global<ObsoleteCtrlKeys>::Get()->ForEach(
-          [](const std::string& k) { Global<CtrlClient>::Get()->ClearMasterKV(k); });
+      Singleton<ObsoleteCtrlKeys>::Get()->ForEach(
+          [](const std::string& k) { Singleton<CtrlClient>::Get()->ClearMasterKV(k); });
     }
-    Global<ObsoleteCtrlKeys>::Get()->Clear();
+    Singleton<ObsoleteCtrlKeys>::Get()->Clear();
     OF_ENV_BARRIER();
   }
 }
 
 void PushClusterInstruction(const ClusterInstructionProto& cluster_instruction) {
   const std::string& key = GetClusterInstructionKey();
-  Global<CtrlClient>::Get()->PushMasterKV(key, cluster_instruction);
+  Singleton<CtrlClient>::Get()->PushMasterKV(key, cluster_instruction);
   OccasionallyClearCtrlKV(key);
 }
 
 void PullClusterInstruction(ClusterInstructionProto* cluster_instruction) {
   const std::string& key = GetClusterInstructionKey();
-  Global<CtrlClient>::Get()->PullMasterKV(key, cluster_instruction);
+  Singleton<CtrlClient>::Get()->PullMasterKV(key, cluster_instruction);
   OccasionallyClearCtrlKV(key);
 }
 
@@ -95,8 +95,8 @@ void PullClusterInstruction(ClusterInstructionProto* cluster_instruction) {
 
 void ClusterInstruction::NewSessionBarrier() {
   OF_ENV_BARRIER();
-  Global<CtrlClient>::Get()->Clear();
-  Global<ObsoleteCtrlKeys>::Get()->Clear();
+  Singleton<CtrlClient>::Get()->Clear();
+  Singleton<ObsoleteCtrlKeys>::Get()->Clear();
   OF_ENV_BARRIER();
 }
 
@@ -115,15 +115,9 @@ void ClusterInstruction::MasterSendHalt() {
 }
 
 void ClusterInstruction::MasterSendAbort() {
-  LOG(ERROR) << "sending abort instruction";
+  LOG(INFO) << "Sending abort instruction.";
   ClusterInstructionProto cluster_instruction;
   cluster_instruction.mutable_cluster_ctrl_abort();
-  PushClusterInstruction(cluster_instruction);
-}
-
-void ClusterInstruction::MasterSendEagerInstruction(
-    const ClusterInstructionProto& cluster_instruction) {
-  CHECK(cluster_instruction.has_eager_instruction());
   PushClusterInstruction(cluster_instruction);
 }
 

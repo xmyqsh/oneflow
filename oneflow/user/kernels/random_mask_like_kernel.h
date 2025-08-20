@@ -16,9 +16,11 @@ limitations under the License.
 #ifndef ONEFLOW_USER_KERNELS_RANDOM_MASK_LIKE_KERNEL_H_
 #define ONEFLOW_USER_KERNELS_RANDOM_MASK_LIKE_KERNEL_H_
 
-#include "oneflow/user/kernels/random_mask_generator.h"
 #include "oneflow/core/framework/framework.h"
 #include "oneflow/core/kernel/cuda_graph_support.h"
+#include "oneflow/user/kernels/random_mask_generator.h"
+#include "oneflow/user/kernels/random_seed_util.h"
+#include "oneflow/core/ep/include/device.h"
 
 namespace oneflow {
 
@@ -43,25 +45,28 @@ class RandomMaskLikeKernel final : public user_op::OpKernel, public user_op::Cud
 
   std::shared_ptr<user_op::OpKernelState> CreateOpKernelState(
       user_op::KernelInitContext* ctx) const override {
-    const auto& generator = CHECK_JUST(one::MakeAutoGenerator());
-    generator->set_current_seed(ctx->Attr<int64_t>("seed"));
-    // TODO(liujuncheng): force creation
-    RandomMaskGenerator<device_type> gen(generator);
+    const auto& generator = CHECK_JUST(one::MakeGenerator(device_type));
+    generator->set_current_seed(
+        CHECK_JUST(GetOpKernelRandomSeedInCurrentRank(ctx, ctx->Attr<int64_t>("seed"))));
     return std::make_shared<RandomMaskLikeKernelState>(generator);
   }
 
  private:
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     const user_op::Tensor* like = ctx->Tensor4ArgNameAndIndex("like", 0);
     user_op::Tensor* out = ctx->Tensor4ArgNameAndIndex("out", 0);
-    int64_t elem_cnt = like->shape().elem_cnt();
-    int8_t* mask = out->mut_dptr<int8_t>();
+    int64_t elem_cnt = like->shape_view().elem_cnt();
+    bool* mask = out->mut_dptr<bool>();
     auto* random_mask_like_state = dynamic_cast<RandomMaskLikeKernelState*>(state);
     CHECK_NOTNULL(random_mask_like_state);
     const auto& generator = random_mask_like_state->generator();
     CHECK_NOTNULL(generator);
-    auto random_mask_like_gen = std::make_shared<RandomMaskGenerator<device_type>>(generator);
-    random_mask_like_gen->Generate(ctx->device_ctx(), elem_cnt, ctx->Attr<float>("rate"), mask);
+    auto* stream = ctx->stream();
+    const auto device_index = stream->device()->device_index();
+    auto random_mask_like_gen =
+        std::make_shared<RandomMaskGenerator<device_type>>(generator, device_index);
+    random_mask_like_gen->Generate(stream, elem_cnt, ctx->Attr<float>("rate"), mask);
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };

@@ -16,6 +16,10 @@ limitations under the License.
 #include "oneflow/core/job_rewriter/job_pass.h"
 #include "oneflow/core/framework/framework.h"
 
+#ifdef WITH_CUDA
+#include <cudnn.h>
+#endif  // WITH_CUDA
+
 namespace oneflow {
 
 namespace {
@@ -26,6 +30,16 @@ bool IsFusedBnAddReluSupported() {
 #else
   return false;
 #endif
+}
+
+bool IsNormalizationAddReluOp(const OperatorConf& op) {
+  return op.has_user_conf()
+         && (op.user_conf().op_type_name() == "normalization_add_relu"
+             || op.user_conf().op_type_name() == "normalization_add_relu_grad");
+}
+
+bool NeedDoPass(const Job& job) {
+  return std::any_of(job.net().op().cbegin(), job.net().op().cend(), IsNormalizationAddReluOp);
 }
 
 }  // namespace
@@ -46,36 +60,37 @@ class CudnnFusedNormalizationAddReluPass final : public JobPass {
       return IsFusedBnAddReluSupported();
     }
   }
-  Maybe<void> Apply(const OpGraph& op_graph, JobBuilder* job_builder) const;
-
-  Maybe<void> Apply(Job* job, JobPassCtx* ctx) const override {
-    if (!IsEnabled(*ctx)) { return Maybe<void>::Ok(); }
-    const OpGraph op_graph(*job);
-    JobBuilder job_builder(job);
-    return Apply(op_graph, &job_builder);
-  }
+  Maybe<void> Apply(Job* job, JobPassCtx* ctx) const override;
 };
 
-Maybe<void> CudnnFusedNormalizationAddReluPass::Apply(const OpGraph& op_graph,
-                                                      JobBuilder* job_builder) const {
+Maybe<void> CudnnFusedNormalizationAddReluPass::Apply(Job* job, JobPassCtx* ctx) const {
+  if (!IsEnabled(*ctx)) { return Maybe<void>::Ok(); }
+  if (!NeedDoPass(*job)) { return Maybe<void>::Ok(); }
+  const OpGraph op_graph(*job);
+  JobBuilder job_builder(job);
+  const DataType mixed_precision_data_type = ctx->job_desc().mixed_precision_data_type();
   op_graph.ForEachNode([&](const OpNode* op_node) {
     const OperatorConf& op_conf = op_node->op().op_conf();
-    if (!op_conf.has_user_conf()) { return; }
+    if (!IsNormalizationAddReluOp(op_conf)) { return; }
     const std::string& op_type_name = op_conf.user_conf().op_type_name();
-    if (op_type_name != "normalization_add_relu" && op_type_name != "normalization_add_relu_grad") {
-      return;
-    }
     const user_op::UserOpConfWrapper user_op_conf(op_conf);
     const BlobDesc& x_desc =
         op_node->LogicalBlobDesc4Lbi(GenLogicalBlobId(user_op_conf.input("x", 0)));
     const int32_t axis = user_op_conf.attr<int32_t>("axis");
-    if (x_desc.data_type() != DataType::kFloat16) { return; }
+    if (x_desc.data_type() != mixed_precision_data_type) { return; }
     const Shape& x_shape = x_desc.shape();
     if (x_shape.Count(axis + 1) != 1) { return; }
     if (x_shape.At(axis) % 4 != 0) { return; }
     OperatorConf new_op_conf = op_conf;
+    auto mute_attrs = new_op_conf.mutable_user_conf()->mutable_attr();
+    auto training_it = mute_attrs->find("training");
+    if (training_it != mute_attrs->end()) {
+      const bool training = user_op_conf.attr<bool>("training");
+      if (!training) { return; }
+      mute_attrs->erase(training_it);
+    }
     new_op_conf.mutable_user_conf()->set_op_type_name("cudnn_fused_" + op_type_name);
-    job_builder->MutOpsOnlyOnce({new_op_conf});
+    job_builder.MutOpsOnlyOnce({new_op_conf});
   });
   return Maybe<void>::Ok();
 }

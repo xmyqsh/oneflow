@@ -14,25 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 from oneflow.framework.env_util import api_all_device_placement as all_device_placement
-from oneflow.framework.env_util import api_ctrl_port as ctrl_port
-from oneflow.framework.env_util import api_data_port as data_port
-from oneflow.framework.env_util import api_env_init as init
-from oneflow.framework.env_util import api_grpc_use_no_signal as grpc_use_no_signal
-from oneflow.framework.env_util import api_init_bootstrap_confs as init_bootstrap_confs
-from oneflow.framework.env_util import api_log_dir as log_dir
-from oneflow.framework.env_util import api_logbuflevel as logbuflevel
-from oneflow.framework.env_util import api_logtostderr as logtostderr
-from oneflow.framework.env_util import api_machine as machine
-
 import oneflow._oneflow_internal
 
 
 def get_local_rank():
+    """Returns the local rank of current machine.
+    Local rank is not globally unique. It is only unique per process on a machine.
+
+    Returns:
+        The the local rank of process on current machine.
+
+    """
     return oneflow._oneflow_internal.GetLocalRank()
 
 
 def get_rank():
     """Returns the rank of current process group.
+    Rank is globally unique, range of which is [0, world_size).
 
     Returns:
         The rank of the process group.
@@ -42,6 +40,12 @@ def get_rank():
 
 
 def get_node_size():
+    """Returns the number of machines in the current process group.
+
+    Returns:
+        The the number of machines in the process group.
+
+    """
     return oneflow._oneflow_internal.GetNodeSize()
 
 
@@ -55,5 +59,35 @@ def get_world_size():
     return oneflow._oneflow_internal.GetWorldSize()
 
 
-def is_multi_client():
-    return oneflow._oneflow_internal.IsMultiClient()
+def init_rdma():
+    """
+    Init RDMA in the current envirment. If the current envirment support 
+    RDMA, turning on RDMA by calling oneflow.env.init_rdma() can speed up 
+    data transfer.
+
+    Note:
+        - Make sure to avoid using fork() after oneflow.env.init_rdma() is invoked. 
+          Otherwise, data corruption or segmentation fault  may result!
+
+        - Requires all devices to execute oneflow.env.init_rdma() simultaneously. 
+          Otherwise, deadlock may result!
+
+
+    """
+    oneflow._oneflow_internal.InitRDMA()
+
+
+def rdma_is_initialized():
+    """Returns whether RDMA is initialized in the current envirment or not.
+
+    Returns:
+        Whether RDMA is initialized or not.
+
+    """
+    return oneflow._oneflow_internal.RDMAIsInitialized()
+
+
+def destory_rdma():
+    """Destory RDMA in the current envirment. 
+    """
+    return oneflow._oneflow_internal.DestoryRDMA()

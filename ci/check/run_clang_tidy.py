@@ -21,6 +21,7 @@ import argparse
 import subprocess
 import os
 from typing import List, Optional
+from pathlib import Path
 
 
 def split_and_print(prefix, text):
@@ -58,9 +59,9 @@ async def run_command(cmd=None, dry=False, name=None):
 
 def download(build_dir, dry=False) -> Optional[List[str]]:
     urls = [
-        "https://github.com/Oneflow-Inc/llvm-project/releases/download/latest/clang-tidy-489012f-x86_64.AppImage"
+        "https://github.com/Oneflow-Inc/llvm-project/releases/download/update-err-msg-checker/clang-tidy-15.AppImage"
         if os.getenv("CI")
-        else "https://oneflow-static.oss-cn-beijing.aliyuncs.com/bin/clang-tidy/linux-x86_64/clang-tidy.AppImage",
+        else "https://oneflow-static.oss-cn-beijing.aliyuncs.com/bin/clang-tidy/linux-x86_64/clang-tidy-15.AppImage",
         "https://raw.githubusercontent.com/oneflow-inc/llvm-project/maybe/clang-tools-extra/clang-tidy/tool/clang-tidy-diff.py",
     ]
     dst_dir = f"{build_dir}/cache/bin"
@@ -85,15 +86,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--build_dir", required=True,
     )
+    parser.add_argument(
+        "--check-error-msg", action="store_true", default=False,
+    )
     args = parser.parse_args()
     loop = asyncio.get_event_loop()
     downloaded = download(args.build_dir, dry=True)
     if downloaded is None:
         downloaded = download(args.build_dir)
     assert downloaded is not None
-    ret_code = loop.run_until_complete(
-        run_command(
-            f"cd .. && git diff -U0 master | {downloaded[1]} -clang-tidy-binary {downloaded[0]} -path {args.build_dir} -j $(nproc) -p1  -allow-enabling-alpha-checkers -extra-arg=-Xclang -extra-arg=-analyzer-config -extra-arg=-Xclang -extra-arg=aggressive-binary-operation-simplification=true -warnings-as-errors=*,-maybe-glog-fatal,-clang-analyzer-alpha.*"
-        )
+    warnings_as_errors = (
+        (Path(__file__).parent / "clang_tidy_warnings_as_errors_on_diff")
+        .read_text()
+        .strip()
     )
+    cmd = f"git diff -U0 master | {downloaded[1]} -clang-tidy-binary {downloaded[0]} -path {args.build_dir} -j $(nproc) -p1 -allow-enabling-alpha-checkers -extra-arg=-Xclang -extra-arg=-analyzer-config -extra-arg=-Xclang -extra-arg=aggressive-binary-operation-simplification=true"
+    if args.check_error_msg:
+        command = f" cd .. && {cmd} -warnings-as-errors='{warnings_as_errors}' && {cmd} -checks=-*,maybe-need-error-msg -warnings-as-errors=* -skip-line-filter"
+    else:
+        command = f"cd .. && {cmd} -warnings-as-errors='{warnings_as_errors}'"
+
+    ret_code = loop.run_until_complete(run_command(command))
     exit(ret_code)

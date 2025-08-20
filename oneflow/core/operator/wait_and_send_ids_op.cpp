@@ -28,7 +28,7 @@ namespace {
 
 Maybe<void> InferBlobDescs(const OperatorConf& op_conf,
                            const std::function<BlobDesc*(const std::string&)>& BlobDesc4BnInOp) {
-  BlobDesc4BnInOp("out")->mut_shape() = Shape({1});
+  BlobDesc4BnInOp("out")->set_shape(Shape({1}));
   BlobDesc4BnInOp("out")->set_data_type(op_conf.wait_and_send_ids_conf().data_type());
   return Maybe<void>::Ok();
 }
@@ -49,7 +49,7 @@ Maybe<void> WaitAndSendIdsOp::InferOutBlobDescs(
   return InferBlobDescs(op_conf(), GetBlobDesc4BnInOp);
 }
 
-Maybe<void> WaitAndSendIdsOp::GetSbpSignatures(cfg::SbpSignatureList* sbp_sig_list) const {
+Maybe<void> WaitAndSendIdsOp::GetSbpSignatures(SbpSignatureList* sbp_sig_list) const {
   SbpSignatureBuilder().Broadcast(output_bns()).Build(sbp_sig_list->mutable_sbp_signature()->Add());
   return Maybe<void>::Ok();
 }

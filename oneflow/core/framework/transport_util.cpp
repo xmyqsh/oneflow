@@ -19,26 +19,13 @@ limitations under the License.
 #include "oneflow/core/framework/transport_util.h"
 #include "oneflow/core/job/parallel_desc.h"
 #include "oneflow/core/transport/transport.h"
-#include "oneflow/core/thread/thread_consistent_id.h"
+#include "oneflow/core/thread/thread_global_id.h"
 #include "oneflow/core/job/rank_group.h"
 #include "oneflow/core/common/data_type.h"
 #include "oneflow/core/common/spin_counter.h"
 #include "oneflow/core/rpc/include/global_process_ctx.h"
-#include "oneflow/core/common/thread_local_callback.h"
 
 namespace oneflow {
-
-/*static*/ Maybe<void> TransportUtil::WaitUntilDoneOrTimeout(const AsyncTransportCtx& ctx,
-                                                             int64_t seconds) {
-  bool is_printed = false;
-  const auto& TryPrintStackInfo = [&is_printed] {
-    if (!is_printed) { blocking::StackInfoCallback(); }
-    is_printed = true;
-  };
-  JUST(SpinWaitUntilTimeout([&] { return *ctx.flying_cnt() > 0; }, seconds, TryPrintStackInfo,
-                            TransportUtil::BlockingWarningIntervalSeconds()));
-  return Maybe<void>::Ok();
-}
 
 namespace {
 
@@ -49,17 +36,17 @@ template<Maybe<void> (*SendOrRecv)(const TransportToken&, int64_t, void*, std::s
          typename ForEachRankT>
 Maybe<void> AccessToOtherRanks(const ForEachRankT& ForEachRank, const TransportToken& token,
                                AsyncTransportCtx* ctx) {
-  const auto& flying_cnt = ctx->flying_cnt();
-  JUST(ForEachRank([&](int64_t rank) -> Maybe<void> {
+  auto* blocking_counter = ctx->mut_blocking_counter();
+  JUST(ForEachRank([&, blocking_counter](int64_t rank) -> Maybe<void> {
     if (rank == GlobalProcessCtx::Rank()) { return Maybe<void>::Ok(); }
-    ++*flying_cnt;
+    blocking_counter->Increase();
     void* buffer = nullptr;
     std::size_t size = 0;
     std::function<void()> Callback;
     JUST((ctx->*Prepare)(rank, &buffer, &size, &Callback));
-    JUST(SendOrRecv(token, rank, buffer, size, [flying_cnt, Callback]() {
+    JUST(SendOrRecv(token, rank, buffer, size, [blocking_counter, Callback]() {
       Callback();
-      --*flying_cnt;
+      blocking_counter->Decrease();
     }));
     return Maybe<void>::Ok();
   }));
@@ -96,7 +83,7 @@ namespace {
 
 Maybe<std::shared_ptr<TransportToken>> RawGetTransportToken(const TransportToken& token) {
   CHECK_EQ_OR_RETURN(token.seq_id(), 0);
-  JUST(token.CheckThreadConsistentId());
+  JUST(token.CheckThreadGlobalId());
   auto auto_token = std::make_shared<TransportToken>(token);
   return auto_token;
 }
@@ -119,7 +106,7 @@ Maybe<void> Send(const TransportToken& token, int64_t rank, void* buffer, std::s
   int64_t src_rank = GlobalProcessCtx::Rank();
   int64_t dst_rank = rank;
   TransportToken send_token = JUST(GetAutoIncrementalTransportToken(src_rank, dst_rank, token));
-  auto* transport = JUST(GlobalMaybe<Transport>());
+  auto* transport = JUST(SingletonMaybe<Transport>());
   transport->Send(static_cast<uint64_t>(send_token), rank, buffer, size, Callback);
   return Maybe<void>::Ok();
 #else
@@ -134,7 +121,7 @@ Maybe<void> Recv(const TransportToken& token, int64_t rank, void* buffer, std::s
   int64_t src_rank = rank;
   int64_t dst_rank = GlobalProcessCtx::Rank();
   TransportToken recv_token = JUST(GetAutoIncrementalTransportToken(src_rank, dst_rank, token));
-  auto* transport = JUST(GlobalMaybe<Transport>());
+  auto* transport = JUST(SingletonMaybe<Transport>());
   transport->Receive(static_cast<uint64_t>(recv_token), rank, buffer, size, Callback);
   return Maybe<void>::Ok();
 #else

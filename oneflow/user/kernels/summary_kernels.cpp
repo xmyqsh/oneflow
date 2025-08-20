@@ -44,18 +44,18 @@ class SummaryWriteScalar final : public user_op::OpKernel {
     CHECK_NOTNULL(istep);
     int8_t* ctag = const_cast<int8_t*>(tag->dptr<int8_t>());
     CHECK_NOTNULL(ctag);
-    std::string tag_str(reinterpret_cast<char*>(ctag), tag->shape().elem_cnt());
+    std::string tag_str(reinterpret_cast<char*>(ctag), tag->shape_view().elem_cnt());
     EventWriterHelper<DeviceType::kCPU, T>::WriteScalarToFile(
         istep[0], static_cast<double>(tvalue[0]), tag_str);
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return true; }
 };
 
-#define REGISTER_SCALAR_USER_KERNEL(dtype)                \
-  REGISTER_USER_KERNEL("summary_write_scalar")            \
-      .SetCreateFn<SummaryWriteScalar<dtype>>()           \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu") \
-                       & (user_op::HobDataType("in", 0) == GetDataType<dtype>::value));
+#define REGISTER_SCALAR_USER_KERNEL(dtype)                            \
+  REGISTER_USER_KERNEL("summary_write_scalar")                        \
+      .SetCreateFn<SummaryWriteScalar<dtype>>()                       \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("in", 0) == GetDataType<dtype>::value));
 
 REGISTER_SCALAR_USER_KERNEL(double)
 REGISTER_SCALAR_USER_KERNEL(float)
@@ -70,14 +70,14 @@ class CreateSummaryWriter final : public user_op::OpKernel {
  private:
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const std::string& logdir = ctx->Attr<std::string>("logdir");
-    CHECK_JUST(Global<EventsWriter>::Get()->Init(logdir));
+    CHECK_JUST(Singleton<EventsWriter>::Get()->Init(logdir));
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return true; }
 };
 
 REGISTER_USER_KERNEL("create_summary_writer")
     .SetCreateFn<CreateSummaryWriter>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu"));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU));
 
 class FlushSummaryWriter final : public user_op::OpKernel {
  public:
@@ -86,14 +86,14 @@ class FlushSummaryWriter final : public user_op::OpKernel {
 
  private:
   void Compute(user_op::KernelComputeContext* ctx) const override {
-    Global<EventsWriter>::Get()->Flush();
+    Singleton<EventsWriter>::Get()->Flush();
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return true; }
 };
 
 REGISTER_USER_KERNEL("flush_summary_writer")
     .SetCreateFn<FlushSummaryWriter>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu"));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU));
 
 template<typename T>
 class SummaryWriteHistogram final : public user_op::OpKernel {
@@ -110,18 +110,18 @@ class SummaryWriteHistogram final : public user_op::OpKernel {
     CHECK_NOTNULL(istep);
     int8_t* ctag = const_cast<int8_t*>(tag->dptr<int8_t>());
     CHECK_NOTNULL(ctag);
-    std::string tag_str(reinterpret_cast<char*>(ctag), tag->shape().elem_cnt());
+    std::string tag_str(reinterpret_cast<char*>(ctag), tag->shape_view().elem_cnt());
     EventWriterHelper<DeviceType::kCPU, T>::WriteHistogramToFile(static_cast<float>(istep[0]),
                                                                  *value, tag_str);
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return true; }
 };
 
-#define REGISTER_HISTOGRAM_USER_KERNEL(dtype)             \
-  REGISTER_USER_KERNEL("summary_write_histogram")         \
-      .SetCreateFn<SummaryWriteHistogram<dtype>>()        \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu") \
-                       & (user_op::HobDataType("in", 0) == GetDataType<dtype>::value));
+#define REGISTER_HISTOGRAM_USER_KERNEL(dtype)                         \
+  REGISTER_USER_KERNEL("summary_write_histogram")                     \
+      .SetCreateFn<SummaryWriteHistogram<dtype>>()                    \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("in", 0) == GetDataType<dtype>::value));
 
 REGISTER_HISTOGRAM_USER_KERNEL(double)
 REGISTER_HISTOGRAM_USER_KERNEL(float)
@@ -144,7 +144,7 @@ class SummaryWritePb final : public user_op::OpKernel {
     CHECK_NOTNULL(istep);
     int8_t* cvalue = const_cast<int8_t*>(value->dptr<int8_t>());
     CHECK_NOTNULL(cvalue);
-    std::string value_str(reinterpret_cast<char*>(cvalue), value->shape().elem_cnt());
+    std::string value_str(reinterpret_cast<char*>(cvalue), value->shape_view().elem_cnt());
     EventWriterHelper<DeviceType::kCPU, T>::WritePbToFile(istep[0], value_str);
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return true; }
@@ -152,8 +152,8 @@ class SummaryWritePb final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("summary_write_pb")
     .SetCreateFn<SummaryWritePb<int8_t>>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == GetDataType<int8_t>::value));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == GetDataType<int8_t>::value));
 
 template<typename T>
 class SummaryWriteImage final : public user_op::OpKernel {
@@ -170,7 +170,7 @@ class SummaryWriteImage final : public user_op::OpKernel {
     CHECK_NOTNULL(istep);
     char* ctag = const_cast<char*>(tag->dptr<char>());
     CHECK_NOTNULL(ctag);
-    std::string tag_str(ctag, tag->shape().elem_cnt());
+    std::string tag_str(ctag, tag->shape_view().elem_cnt());
     EventWriterHelper<DeviceType::kCPU, T>::WriteImageToFile(static_cast<int64_t>(istep[0]), *value,
                                                              tag_str);
   }
@@ -179,8 +179,8 @@ class SummaryWriteImage final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("summary_write_image")
     .SetCreateFn<SummaryWriteImage<uint8_t>>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == GetDataType<uint8_t>::value));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == GetDataType<uint8_t>::value));
 
 }  // namespace summary
 

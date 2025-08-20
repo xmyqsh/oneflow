@@ -155,7 +155,14 @@ def get_common_docker_args(
     inplace_attr = ""
     if inplace == False:
         inplace_attr = ":ro"
-    return f"-v {oneflow_src_dir}:{oneflow_src_dir}{inplace_attr} {proxy_env_arg} {pwd_arg} {house_dir_arg} {cache_dir_arg} {build_dir_arg} -w {current_dir} --shm-size=8g"
+    cache_dir_args = " ".join(
+        [
+            f"-v {os.path.join(cache_dir, 'ccache')}:/root/.ccache",
+            f"-v {os.path.join(cache_dir, 'local')}:/root/.local",
+            f"-v {os.path.join(cache_dir, 'cache')}:/root/.cache",
+        ]
+    )
+    return f"{cache_dir_args} -v {oneflow_src_dir}:{oneflow_src_dir}{inplace_attr} {proxy_env_arg} {pwd_arg} {house_dir_arg} {cache_dir_arg} {build_dir_arg} -w {current_dir} --shm-size=8g"
 
 
 def get_python_dir(inplace=True, oneflow_src_dir=None, cache_dir=None):
@@ -211,9 +218,12 @@ def build_third_party(
     )
 
     bash_cmd = f"""set -ex
-export TEST_TMPDIR={cache_dir}/bazel_cache
 export ONEFLOW_PYTHON_DIR={oneflow_python_dir}
 {oneflow_python_dir_cmd}
+export PATH="$PATH:$(dirname {get_python_bin('3.6')})"
+export PYTHON_BIN_PATH={get_python_bin('3.6')}
+$PYTHON_BIN_PATH -m pip install -i https://mirrors.aliyun.com/pypi/simple --user -r {os.path.join(oneflow_src_dir, "ci/fixed-dev-requirements.txt")}
+$PYTHON_BIN_PATH -c "from __future__ import print_function;import numpy; print(numpy.get_include());"
 {cmake_cmd}
 cmake --build . -j `nproc` --target oneflow_deps
 """
@@ -302,6 +312,7 @@ export LD_LIBRARY_PATH=/opt/intel/lib:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/opt/intel/oneapi/mkl/latest/lib/intel64:$LD_LIBRARY_PATH
 export ONEFLOW_SRC_DIR={oneflow_src_dir}
 export ONEFLOW_CMAKE_CMD="{cmake_cmd}"
+{python_bin} -m pip install -i https://mirrors.aliyun.com/pypi/simple --user -r {os.path.join(oneflow_src_dir, "ci/fixed-dev-requirements.txt")}
 """
     if enter_bash:
         bash_cmd += "\nbash"
@@ -357,6 +368,9 @@ if __name__ == "__main__":
         "--custom_img_tag", type=str, required=False, default=None,
     )
     parser.add_argument(
+        "--container_name", type=str, required=False, default=None,
+    )
+    parser.add_argument(
         "--cache_dir", type=str, required=False, default=None,
     )
     default_wheel_house_dir = os.path.join(os.getcwd(), "wheelhouse")
@@ -401,7 +415,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_system_proxy", default=False, action="store_true", required=False
     )
-    parser.add_argument("--xla", default=False, action="store_true", required=False)
+    parser.add_argument("--mlir", default=False, action="store_true", required=False)
     parser.add_argument("--gcc4", default=False, action="store_true", required=False)
     parser.add_argument("--gcc7", default=False, action="store_true", required=False)
     parser.add_argument("--gcc9", default=False, action="store_true", required=False)
@@ -439,10 +453,10 @@ if __name__ == "__main__":
         extra_oneflow_cmake_args += " -DBUILD_CUDA=ON"
     cuda_versions = args.cuda_version.split(",")
     cuda_versions = [v.strip() for v in cuda_versions]
-    if args.xla:
-        extra_oneflow_cmake_args += " -DWITH_XLA=ON"
+    if args.mlir:
+        extra_oneflow_cmake_args += " -DWITH_MLIR=ON"
     else:
-        extra_oneflow_cmake_args += " -DWITH_XLA=Off"
+        extra_oneflow_cmake_args += " -DWITH_MLIR=Off"
     for cuda_version in cuda_versions:
 
         cache_dir = None
@@ -461,16 +475,14 @@ if __name__ == "__main__":
                     "CUDNN_STATIC" not in extra_oneflow_cmake_args
                 ), "CUDNN_STATIC will be set to OFF if cuda_version > 11"
                 enforced_oneflow_cmake_args += " -DCUDNN_STATIC=OFF"
-            if args.xla and args.cpu:
-                # https://github.com/tensorflow/tensorflow/issues/35867#issuecomment-578998683
-                enforced_oneflow_cmake_args += (
-                    ' -DBAZEL_ENV_ARGS="BAZEL_LINKLIBS=-l%:libstdc++.a"'
-                )
             extra_docker_args = args.extra_docker_args
-            if "--name" not in extra_docker_args:
-                extra_docker_args += (
-                    f" --name run-by-{getpass.getuser()}-{str(uuid.uuid4())}"
-                )
+            if not args.container_name:
+                args.container_name = f"manylinux-build-run-by-{getpass.getuser()}"
+            assert args.container_name
+            subprocess.call(
+                f"docker rm -f {args.container_name}", shell=True,
+            )
+            extra_docker_args += f" --name {args.container_name}"
             user_img_tag = f"{img_prefix}:{user}"
             inc_img_tag = f"oneflowinc/{versioned_img_tag}"
             img_tag = inc_img_tag
@@ -500,8 +512,6 @@ if __name__ == "__main__":
                     args.dry,
                 )
             bash_args = ""
-            if args.xla:
-                bash_args = "-l"
             bash_wrap = ""
             if args.gcc4:
                 bash_wrap = "gcc --version"
@@ -524,8 +534,8 @@ gcc --version
             else:
                 cache_dir = os.path.join(os.getcwd(), "manylinux2014-build-cache")
                 sub_dir = cuda_version
-                if args.xla:
-                    sub_dir += "-xla"
+                if args.mlir:
+                    sub_dir += "-mlir"
                 if args.gcc4:
                     sub_dir += "-gcc4"
                 if args.gcc7:

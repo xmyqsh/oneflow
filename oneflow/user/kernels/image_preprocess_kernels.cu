@@ -13,9 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#include "oneflow/core/common/memory_format.pb.h"
 #include "oneflow/core/framework/framework.h"
-#include "oneflow/core/common/fixed_vector.h"
+#include "oneflow/core/common/small_vector.h"
 #include "oneflow/core/common/nd_index_offset_helper.h"
+#include "oneflow/core/ep/cuda/cuda_stream.h"
 
 namespace oneflow {
 
@@ -23,11 +25,6 @@ namespace {
 
 struct NormalizeVal {
   float val[3];
-};
-
-enum TensorLayout {
-  kNCHW = 0,
-  kNHWC = 1,
 };
 
 class NormalizeAttr final : public user_op::OpKernelState {
@@ -61,15 +58,14 @@ class NormalizeAttr final : public user_op::OpKernelState {
   NormalizeVal inv_std_;
 };
 
-template<TensorLayout layout>
+template<MemoryFormat layout>
 __device__ __forceinline__ void OutIdx2InIdx(int32_t* out_idx, int32_t* in_idx,
                                              const int8_t* mirror_dptr, int32_t out_W,
                                              int32_t H_offset, int32_t W_offset);
 template<>
-__device__ __forceinline__ void OutIdx2InIdx<TensorLayout::kNCHW>(int32_t* out_idx, int32_t* in_idx,
-                                                                  const int8_t* mirror_dptr,
-                                                                  int32_t out_W, int32_t H_offset,
-                                                                  int32_t W_offset) {
+__device__ __forceinline__ void OutIdx2InIdx<MemoryFormat::kContiguous>(
+    int32_t* out_idx, int32_t* in_idx, const int8_t* mirror_dptr, int32_t out_W, int32_t H_offset,
+    int32_t W_offset) {
   if (mirror_dptr && mirror_dptr[out_idx[0]]) { out_idx[3] = out_W - 1 - out_idx[3]; }
   in_idx[0] = out_idx[0];             // N
   in_idx[1] = out_idx[2] + H_offset;  // H
@@ -78,10 +74,9 @@ __device__ __forceinline__ void OutIdx2InIdx<TensorLayout::kNCHW>(int32_t* out_i
 }
 
 template<>
-__device__ __forceinline__ void OutIdx2InIdx<TensorLayout::kNHWC>(int32_t* out_idx, int32_t* in_idx,
-                                                                  const int8_t* mirror_dptr,
-                                                                  int32_t out_W, int32_t H_offset,
-                                                                  int32_t W_offset) {
+__device__ __forceinline__ void OutIdx2InIdx<MemoryFormat::kChannelsLast>(
+    int32_t* out_idx, int32_t* in_idx, const int8_t* mirror_dptr, int32_t out_W, int32_t H_offset,
+    int32_t W_offset) {
   if (mirror_dptr && mirror_dptr[out_idx[0]]) { out_idx[2] = out_W - 1 - out_idx[2]; }
   in_idx[0] = out_idx[0];             // N
   in_idx[1] = out_idx[1] + H_offset;  // H
@@ -89,7 +84,7 @@ __device__ __forceinline__ void OutIdx2InIdx<TensorLayout::kNHWC>(int32_t* out_i
   in_idx[3] = out_idx[3];             // C
 }
 
-template<TensorLayout layout>
+template<MemoryFormat layout>
 __global__ void CropMirrorNormalizeGpuImpl(int32_t elem_cnt, const uint8_t* in_dptr,
                                            float* out_dptr, const int8_t* mirror_dptr,
                                            int32_t out_W,
@@ -140,7 +135,8 @@ class CropMirrorNormalizeGpuKernel final : public user_op::OpKernel {
 
  private:
   using user_op::OpKernel::Compute;
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     auto* normalize_attr = dynamic_cast<NormalizeAttr*>(state);
     const NormalizeVal& mean = normalize_attr->mean();
     const NormalizeVal& inv_std = normalize_attr->inv_std();
@@ -149,8 +145,8 @@ class CropMirrorNormalizeGpuKernel final : public user_op::OpKernel {
     const std::string& output_layout = ctx->Attr<std::string>("output_layout");
     float* out_dptr = out_blob->mut_dptr<float>();
     const uint8_t* in_dptr = in_blob->dptr<uint8_t>();
-    const ShapeView& in_shape = in_blob->shape();
-    const ShapeView& out_shape = out_blob->shape();
+    const ShapeView& in_shape = in_blob->shape_view();
+    const ShapeView& out_shape = out_blob->shape_view();
     CHECK_EQ(in_shape.NumAxes(), 4);
     CHECK_EQ(out_shape.NumAxes(), 4);
     int32_t elem_cnt = out_shape.elem_cnt();
@@ -177,11 +173,11 @@ class CropMirrorNormalizeGpuKernel final : public user_op::OpKernel {
       int32_t H_offset = (in_H - out_H) * crop_pos_y;
       int32_t W_offset = (in_W - out_W) * crop_pos_x;
       const NdIndexOffsetHelper<int32_t, 4> out_helper(N, C, out_H, out_W);
-      CropMirrorNormalizeGpuImpl<TensorLayout::kNCHW>
+      CropMirrorNormalizeGpuImpl<MemoryFormat::kContiguous>
           <<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0,
-             ctx->device_ctx()->cuda_stream()>>>(elem_cnt, in_dptr, out_dptr, mirror_dptr, out_W,
-                                                 in_helper, out_helper, H_offset, W_offset, mean,
-                                                 inv_std);
+             ctx->stream()->As<ep::CudaStream>()->cuda_stream()>>>(
+              elem_cnt, in_dptr, out_dptr, mirror_dptr, out_W, in_helper, out_helper, H_offset,
+              W_offset, mean, inv_std);
     } else if (output_layout == "NHWC") {
       CHECK_EQ(N, out_shape.At(0));
       int32_t out_H = out_shape.At(1);
@@ -192,11 +188,11 @@ class CropMirrorNormalizeGpuKernel final : public user_op::OpKernel {
       int32_t H_offset = (in_H - out_H) * crop_pos_y;
       int32_t W_offset = (in_W - out_W) * crop_pos_x;
       const NdIndexOffsetHelper<int32_t, 4> out_helper(N, out_H, out_W, C);
-      CropMirrorNormalizeGpuImpl<TensorLayout::kNHWC>
+      CropMirrorNormalizeGpuImpl<MemoryFormat::kChannelsLast>
           <<<BlocksNum4ThreadsNum(elem_cnt), kCudaThreadsNumPerBlock, 0,
-             ctx->device_ctx()->cuda_stream()>>>(elem_cnt, in_dptr, out_dptr, mirror_dptr, out_W,
-                                                 in_helper, out_helper, H_offset, W_offset, mean,
-                                                 inv_std);
+             ctx->stream()->As<ep::CudaStream>()->cuda_stream()>>>(
+              elem_cnt, in_dptr, out_dptr, mirror_dptr, out_W, in_helper, out_helper, H_offset,
+              W_offset, mean, inv_std);
     } else {
       UNIMPLEMENTED();
     }
@@ -206,8 +202,8 @@ class CropMirrorNormalizeGpuKernel final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("crop_mirror_normalize_from_uint8")
     .SetCreateFn<CropMirrorNormalizeGpuKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "gpu")
-                     & (user_op::HobDataType("in", 0) == DataType::kUInt8)
-                     & (user_op::HobDataType("out", 0) == DataType::kFloat));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCUDA)
+                     && (user_op::HobDataType("in", 0) == DataType::kUInt8)
+                     && (user_op::HobDataType("out", 0) == DataType::kFloat));
 
 }  // namespace oneflow

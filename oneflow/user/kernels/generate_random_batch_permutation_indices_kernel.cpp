@@ -16,7 +16,7 @@ limitations under the License.
 #include <cstdint>
 #include "oneflow/core/framework/framework.h"
 #include "oneflow/core/kernel/new_kernel_util.h"
-#include "oneflow/user/kernels/op_kernel_state_wrapper.h"
+#include "oneflow/user/kernels/op_kernel_wrapper.h"
 
 namespace oneflow {
 
@@ -32,11 +32,12 @@ class GenerateRandomBatchPermutationIndicesCPUKernel final : public user_op::OpK
   }
 
  private:
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     auto* random_generator = dynamic_cast<OpKernelStateWrapper<std::mt19937>*>(state);
     user_op::Tensor* y = ctx->Tensor4ArgNameAndIndex("y", 0);
-    std::iota(y->mut_dptr<int32_t>(), y->mut_dptr<int32_t>() + y->shape().elem_cnt(), 0);
-    std::shuffle(y->mut_dptr<int32_t>(), y->mut_dptr<int32_t>() + y->shape().elem_cnt(),
+    std::iota(y->mut_dptr<int32_t>(), y->mut_dptr<int32_t>() + y->shape_view().elem_cnt(), 0);
+    std::shuffle(y->mut_dptr<int32_t>(), y->mut_dptr<int32_t>() + y->shape_view().elem_cnt(),
                  *random_generator->Mutable());
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
@@ -44,6 +45,6 @@ class GenerateRandomBatchPermutationIndicesCPUKernel final : public user_op::OpK
 
 REGISTER_USER_KERNEL("generate_random_batch_permutation_indices")
     .SetCreateFn<GenerateRandomBatchPermutationIndicesCPUKernel>()
-    .SetIsMatchedHob(user_op::HobDeviceTag() == "cpu");
+    .SetIsMatchedHob(user_op::HobDeviceType() == DeviceType::kCPU);
 
 }  // namespace oneflow

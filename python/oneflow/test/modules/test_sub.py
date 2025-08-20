@@ -18,20 +18,29 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from automated_test_util import *
-from test_util import GenArgList
+import torch as torch_original
+
+from oneflow.test_utils.automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_sub_impl(test_case, shape, device):
-    x = flow.Tensor(
-        np.random.randn(*shape), device=flow.device(device), requires_grad=True
+    x = flow.tensor(
+        np.random.randn(*shape),
+        dtype=flow.float32,
+        device=flow.device(device),
+        requires_grad=True,
     )
-    y = flow.Tensor(
-        np.random.randn(*shape), device=flow.device(device), requires_grad=True
+    y = flow.tensor(
+        np.random.randn(*shape),
+        dtype=flow.float32,
+        device=flow.device(device),
+        requires_grad=True,
     )
     of_out = flow.sub(x, y)
     np_out = np.subtract(x.numpy(), y.numpy())
@@ -43,27 +52,35 @@ def _test_sub_impl(test_case, shape, device):
     test_case.assertTrue(np.allclose(x.grad.numpy(), np_grad_x, 1e-05, 1e-05))
     test_case.assertTrue(np.allclose(y.grad.numpy(), np_grad_y, 1e-05, 1e-05))
     x = 5
-    y = flow.Tensor(np.random.randn(*shape), device=flow.device(device))
+    y = flow.tensor(
+        np.random.randn(*shape), dtype=flow.float32, device=flow.device(device)
+    )
     of_out = flow.sub(x, y)
     np_out = np.subtract(x, y.numpy())
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
-    x = flow.Tensor(np.random.randn(*shape), device=flow.device(device))
+    x = flow.tensor(
+        np.random.randn(*shape), dtype=flow.float32, device=flow.device(device)
+    )
     y = 5
     of_out = flow.sub(x, y)
     np_out = np.subtract(x.numpy(), y)
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
-    x = flow.Tensor(np.random.randn(*shape), device=flow.device(device))
-    y = flow.Tensor(np.random.randn(1, 1), device=flow.device(device))
+    x = flow.tensor(
+        np.random.randn(*shape), dtype=flow.float32, device=flow.device(device)
+    )
+    y = flow.tensor(
+        np.random.randn(1, 1), dtype=flow.float32, device=flow.device(device)
+    )
     of_out = flow.sub(x, y)
     np_out = np.subtract(x.numpy(), y.numpy())
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
-    x = flow.Tensor(np.array([5.0]))
-    y = flow.Tensor(np.random.randn(1, 1))
+    x = flow.tensor(np.array([5.0]), dtype=flow.float32)
+    y = flow.tensor(np.random.randn(1, 1), dtype=flow.float32)
     of_out = flow.sub(x, y)
     np_out = np.subtract(x.numpy(), y.numpy())
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
-    x = flow.Tensor(np.random.randn(1, 1), requires_grad=True)
-    y = flow.Tensor(np.array([5.0]), requires_grad=True)
+    x = flow.tensor(np.random.randn(1, 1), dtype=flow.float32, requires_grad=True)
+    y = flow.tensor(np.array([5.0]), dtype=flow.float32, requires_grad=True)
     of_out = flow.sub(x, y)
     np_out = np.subtract(x.numpy(), y.numpy())
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
@@ -84,43 +101,80 @@ class TestSubModule(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             _test_sub_impl(test_case, *arg)
 
-    def test_sub_against_pytorch(test_case):
-        arg_dict = OrderedDict()
-        arg_dict["test_type"] = [test_flow_against_pytorch, test_tensor_against_pytorch]
-        arg_dict["device"] = ["cpu", "cuda"]
-        arg_dict["op"] = ["sub"]
-        for arg in GenArgList(arg_dict):
-            arg[0](
-                test_case,
-                arg[2],
-                extra_annotations={"other": flow.Tensor},
-                extra_generators={
-                    "input": random_tensor(ndim=2, dim0=2, dim1=3),
-                    "other": random_tensor(ndim=2, dim0=2, dim1=3),
-                },
-                device=arg[1],
-            )
-            arg[0](
-                test_case,
-                arg[2],
-                extra_annotations={"other": float},
-                extra_generators={
-                    "input": random_tensor(ndim=2, dim0=2, dim1=3),
-                    "other": random(0, 5),
-                },
-                device=arg[1],
-            )
-
-    @autotest(auto_backward=False)
-    def test_sub_with_0shape_data(test_case):
+    @autotest(n=5, auto_backward=False, check_graph=True, include_complex=True)
+    def test_random_dim_sub(test_case):
         device = random_device()
-        x = random_pytorch_tensor(2, 0, 3).to(device)
-        y = random_pytorch_tensor(2, 1, 3).to(device)
+        dim0 = random(low=1, high=4).to(int)
+        dim1 = random(low=1, high=4).to(int)
+        x = random_tensor(ndim=2, dim0=dim0, dim1=dim1).to(device)
+        y = random_tensor(ndim=2, dim0=dim0, dim1=dim1).to(device)
+        z = x - y
+        return z
+
+    @autotest(n=5, auto_backward=False, check_graph=True, include_complex=True)
+    def test_random_dim_scalar_sub(test_case):
+        device = random_device()
+        dim0 = random(low=1, high=4).to(int)
+        dim1 = random(low=1, high=4).to(int)
+        x = random_tensor(ndim=2, dim0=dim0, dim1=dim1).to(device)
+        y = random_tensor(ndim=0).to(device)
+        z = x - y
+        return z
+
+    @autotest(n=5, auto_backward=False, check_graph=True, include_complex=True)
+    def test_sub_with_0_size_data(test_case):
+        device = random_device()
+        x = random_tensor(2, 0, 3).to(device)
+        y = random_tensor(2, 1, 3).to(device)
         out1 = x - y
         out2 = x - 2
         out3 = 2 - x
         out4 = torch.sub(x, y)
         return out1, out2, out3, out4
+
+    @autotest(n=5, auto_backward=False, check_graph=True, include_complex=True)
+    def test_sub_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = random_tensor(ndim=0).to(device)
+        out1 = x - y
+        out2 = x - 2
+        out3 = 2 - x
+        out4 = torch.sub(x, y)
+        return out1, out2, out3, out4
+
+    @autotest(n=5, include_complex=True)
+    def test_sub_with_alpha(test_case):
+        device = random_device()
+        x1 = random_tensor(2, 2, 3).to(device)
+        x2 = random_tensor(2, 2, 3).to(device)
+        x3 = random_tensor(2, 2, 3).to(device)
+        y = random_tensor(2, 2, 3).to(device)
+        s = random().to(float)
+        alpha = random().to(float)
+        z1 = torch.sub(x1, y, alpha=alpha)
+        z2 = torch.sub(x2, s, alpha=alpha)
+        z3 = torch.sub(s, x3, alpha=alpha)
+        return z1, z2, z3
+
+    @autotest(n=5, include_complex=True)
+    def test_non_contiguous_inplace_sub(test_case):
+        device = random_device()
+        x = random_tensor(2, 2, 4).to(device)
+        y = x + 1
+        y = y[:, 1:3]
+        y -= random_tensor(2, 2, 2).to(device)
+        return y
+
+    @unittest.skip("skip for now, becase it failed 2 times in past week")
+    @autotest(n=5, include_complex=True)
+    def test_scalar_sub_with_random_devices(test_case):
+        x1_device = random_device()
+        x2_device = random_device()
+        x1 = random_tensor(2, 2, 3).to(x1_device).mean()
+        x2 = random_tensor(2, 2, 3).to(x2_device)
+        y = x1 - x2
+        return y
 
 
 if __name__ == "__main__":

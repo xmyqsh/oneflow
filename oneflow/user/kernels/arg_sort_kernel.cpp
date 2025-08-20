@@ -29,8 +29,8 @@ class CpuArgSortKernel final : public user_op::OpKernel {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out = ctx->Tensor4ArgNameAndIndex("out", 0);
 
-    const int32_t instance_size = in->shape().At(in->shape().NumAxes() - 1);
-    const int32_t instance_num = in->shape().elem_cnt() / instance_size;
+    const int32_t instance_size = in->shape_view().At(in->shape_view().NumAxes() - 1);
+    const int32_t instance_num = in->shape_view().elem_cnt() / instance_size;
     const std::string& direction = ctx->Attr<std::string>("direction");
     const bool is_ascending = direction == "ASCENDING";
     const bool is_descending = direction == "DESCENDING";
@@ -49,7 +49,10 @@ class CpuArgSortKernel final : public user_op::OpKernel {
           } else if (is_descending) {
             return l > r;
           } else {
-            UNIMPLEMENTED();
+            LOG(FATAL) << "expected the input direction parameter value is \"ASCENDING\" or "
+                          "\"DESCENDING\", "
+                       << "but found the value is "
+                       << "\"" << direction << "\"";
           }
         }
       };
@@ -59,14 +62,17 @@ class CpuArgSortKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_CPU_ARG_SORT_KERNEL(dtype)               \
-  REGISTER_USER_KERNEL("arg_sort")                        \
-      .SetCreateFn<CpuArgSortKernel<dtype>>()             \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu") \
-                       & (user_op::HobDataType("in", 0) == GetDataType<dtype>::value));
+#define REGISTER_CPU_ARG_SORT_KERNEL(dtype)                           \
+  REGISTER_USER_KERNEL("arg_sort")                                    \
+      .SetCreateFn<CpuArgSortKernel<dtype>>()                         \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobDataType("in", 0) == GetDataType<dtype>::value));
 
 REGISTER_CPU_ARG_SORT_KERNEL(float)
 REGISTER_CPU_ARG_SORT_KERNEL(double)
+REGISTER_CPU_ARG_SORT_KERNEL(bool)
+REGISTER_CPU_ARG_SORT_KERNEL(int8_t)
+REGISTER_CPU_ARG_SORT_KERNEL(uint8_t)
 REGISTER_CPU_ARG_SORT_KERNEL(int32_t)
 REGISTER_CPU_ARG_SORT_KERNEL(int64_t)
 

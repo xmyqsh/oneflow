@@ -60,7 +60,7 @@ namespace {
 Maybe<void> InferBlobDescs(const OperatorConf& op_conf,
                            const std::function<BlobDesc*(const std::string&)>& BlobDesc4BnInOp) {
   BlobDesc4BnInOp("y")->set_data_type(op_conf.shape_elem_cnt_conf().data_type());
-  BlobDesc4BnInOp("y")->mut_shape() = Shape({});
+  BlobDesc4BnInOp("y")->set_shape(Shape({}));
   return Maybe<void>::Ok();
 }
 
@@ -90,7 +90,7 @@ void ShapeElemCntOp::VirtualGenKernelConf(
 
 Maybe<void> ShapeElemCntOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   int32_t num_axes = JUST(LogicalBlobDesc4Ibn("x")).shape().NumAxes();
   const auto& inclusive_axes = GetInclusiveAxes(op_conf().shape_elem_cnt_conf(), num_axes);
   auto IsReducedAxis = ReduceSbpUtil::MakePredicatorIsReducedAxis(inclusive_axes, num_axes);

@@ -34,7 +34,7 @@ class LearningRateScheduleOp final : public Operator {
  private:
   Maybe<void> GetSbpSignatures(
       const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-      cfg::SbpSignatureList* sbp_sig_list) const override;
+      SbpSignatureList* sbp_sig_list) const override;
 };
 
 Maybe<void> LearningRateScheduleOp::InitFromOpConf() {
@@ -51,7 +51,7 @@ Maybe<void> InferBlobDescs(const std::function<BlobDesc*(const std::string&)>& B
   CHECK_EQ(train_step->shape().elem_cnt(), 1);
   CHECK_EQ(train_step->data_type(), DataType::kInt64);
   BlobDesc* out = BlobDesc4BnInOp("out");
-  out->mut_shape() = Shape({1});
+  out->set_shape(Shape({1}));
   out->set_data_type(DataType::kFloat);
   return Maybe<void>::Ok();
 }
@@ -72,7 +72,7 @@ Maybe<void> LearningRateScheduleOp::InferOutBlobDescs(
 
 Maybe<void> LearningRateScheduleOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   return Maybe<void>::Ok();
 }
 

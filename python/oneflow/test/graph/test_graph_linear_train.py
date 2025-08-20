@@ -29,7 +29,7 @@ def _test_linear_train_graph(test_case, device):
         flow.nn.init.constant_(linear.bias, 0.23)
         of_sgd = flow.optim.SGD(linear.parameters(), lr=0.001, momentum=0.9)
 
-        x = flow.Tensor(
+        x = flow.tensor(
             [
                 [-0.94630778, -0.83378579, -0.87060891],
                 [2.0289922, -0.28708987, -2.18369248],
@@ -40,6 +40,7 @@ def _test_linear_train_graph(test_case, device):
                 [-0.22556897, 0.74798368, 0.90416439],
                 [0.48339456, -2.32742195, -0.59321527],
             ],
+            dtype=flow.float32,
             device=device,
             requires_grad=False,
         )
@@ -66,7 +67,7 @@ def _test_linear_train_graph(test_case, device):
         flow.nn.init.constant_(linear.bias, 0.23)
         of_sgd = flow.optim.SGD(linear.parameters(), lr=0.001, momentum=0.9)
 
-        x = flow.Tensor(
+        x = flow.tensor(
             [
                 [-0.94630778, -0.83378579, -0.87060891],
                 [2.0289922, -0.28708987, -2.18369248],
@@ -77,6 +78,7 @@ def _test_linear_train_graph(test_case, device):
                 [-0.22556897, 0.74798368, 0.90416439],
                 [0.48339456, -2.32742195, -0.59321527],
             ],
+            dtype=flow.float32,
             device=device,
             requires_grad=False,
         )
@@ -97,7 +99,11 @@ def _test_linear_train_graph(test_case, device):
 
         def one_iter():
             of_graph_out = linear_t_g(x)
-            return of_graph_out.numpy(), linear_t_g.linear.weight.origin.numpy()
+            print(linear_t_g.linear)
+            return (
+                of_graph_out.numpy(),
+                linear_t_g.linear.weight.to(flow.Tensor).numpy(),
+            )
 
         check_list = []
         for i in range(iter_num):
@@ -105,8 +111,8 @@ def _test_linear_train_graph(test_case, device):
         return check_list
 
     iter_num = 3
-    module_check_list = train_with_module()
-    graph_check_list = train_with_graph()
+    module_check_list = train_with_module(iter_num)
+    graph_check_list = train_with_graph(iter_num)
     for i in range(iter_num):
         # check equal on loss
         test_case.assertTrue(

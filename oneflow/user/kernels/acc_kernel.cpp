@@ -15,12 +15,12 @@ limitations under the License.
 */
 #include "oneflow/core/framework/framework.h"
 #include "oneflow/core/kernel/kernel_util.h"
+#include "oneflow/core/ep/include/primitive/add.h"
 
 namespace oneflow {
 
 namespace {
 
-template<DeviceType device_type, typename T>
 class AccKernel final : public user_op::OpKernel {
  public:
   AccKernel() = default;
@@ -30,27 +30,18 @@ class AccKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out = ctx->Tensor4ArgNameAndIndex("out", 0);
-    CHECK_EQ(in->shape().elem_cnt(), out->shape().elem_cnt());
+    CHECK_EQ(in->shape_view().elem_cnt(), out->shape_view().elem_cnt());
     CHECK_EQ(in->data_type(), out->data_type());
-    NewKernelUtil<device_type>::Axpy(ctx->device_ctx(), in->shape().elem_cnt(), GetOneVal<T>(),
-                                     in->dptr<T>(), 1, out->mut_dptr<T>(), 1);
+    std::unique_ptr<ep::primitive::Add> primitive =
+        ep::primitive::NewPrimitive<ep::primitive::AddFactory>(ctx->device_type(), in->data_type());
+    CHECK(primitive);
+    primitive->Launch(ctx->stream(), out->dptr(), in->dptr(), out->mut_dptr(),
+                      in->shape_view().elem_cnt());
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_ACC_KERNEL(device, dtype)                       \
-  REGISTER_USER_KERNEL("acc")                                    \
-      .SetCreateFn<AccKernel<device, OF_PP_PAIR_FIRST(dtype)>>() \
-      .SetIsMatchedHob(                                          \
-          (user_op::HobDeviceTag() == device)                    \
-          & (user_op::HobDataType("out", 0) == GetDataType<OF_PP_PAIR_FIRST(dtype)>::value));
-
-OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_ACC_KERNEL, DEVICE_TYPE_SEQ, FLOATING_DATA_TYPE_SEQ)
-#ifdef WITH_CUDA
-OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_ACC_KERNEL, OF_PP_MAKE_TUPLE_SEQ(DeviceType::kGPU),
-                                 FLOAT16_DATA_TYPE_SEQ)
-#endif
-#undef REGISTER_ACC_KERNEL
+REGISTER_USER_KERNEL("acc").SetCreateFn<AccKernel>();
 
 }  // namespace
 

@@ -18,15 +18,16 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
-def _test_argmax_aixs_negative(test_case, device):
-    input = flow.Tensor(
+def _test_argmax_axis_negative(test_case, device):
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     axis = -1
@@ -36,7 +37,7 @@ def _test_argmax_aixs_negative(test_case, device):
 
 
 def _test_tensor_argmax(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     axis = 0
@@ -47,7 +48,7 @@ def _test_tensor_argmax(test_case, device):
 
 
 def _test_argmax_axis_postive(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     axis = 1
@@ -57,7 +58,7 @@ def _test_argmax_axis_postive(test_case, device):
 
 
 def _test_argmax_keepdims(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     axis = 0
@@ -69,7 +70,7 @@ def _test_argmax_keepdims(test_case, device):
 
 
 def _test_argmax_dim_equal_none(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.random.randn(2, 6, 5, 3), dtype=flow.float32, device=flow.device(device)
     )
     of_out = input.argmax()
@@ -82,7 +83,7 @@ class TestArgmax(flow.unittest.TestCase):
     def test_argmax(test_case):
         arg_dict = OrderedDict()
         arg_dict["test_fun"] = [
-            _test_argmax_aixs_negative,
+            _test_argmax_axis_negative,
             _test_tensor_argmax,
             _test_argmax_axis_postive,
             _test_argmax_keepdims,
@@ -92,13 +93,18 @@ class TestArgmax(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest(n=5, auto_backward=False, rtol=1e-5, atol=1e-5)
+    @autotest(n=5, auto_backward=False, rtol=1e-5, atol=1e-5, check_graph=True)
     def test_argmax_with_random_data(test_case):
         device = random_device()
         ndim = random(1, 6).to(int)
-        x = random_pytorch_tensor(ndim=ndim).to(device)
+        x = random_tensor(ndim=ndim).to(device)
         y = torch.argmax(x, dim=random(0, ndim).to(int), keepdim=random().to(bool))
         return y
+
+    @profile(torch.argmax)
+    def profile_argmax(test_case):
+        torch.argmax(torch.ones(100000))
+        torch.argmax(torch.ones(1000000))
 
 
 if __name__ == "__main__":

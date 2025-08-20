@@ -19,24 +19,44 @@ from collections import OrderedDict
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestCeilModule(flow.unittest.TestCase):
-    @autotest()
+    @autotest(n=5)
     def test_ceil_flow_with_random_data(test_case):
         device = random_device()
-        input = random_pytorch_tensor().to(device)
+        input = random_tensor().to(device)
         y = torch.ceil(input)
         return y
 
-    @autotest(auto_backward=False)
-    def test_ceil_with_0shape_data(test_case):
+    @autotest(n=5)
+    def test_ceil_flow_with_random_0d_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(4, 2, 1, 0, 3).to(device)
+        input = random_tensor(ndim=0).to(device)
+        y = torch.ceil(input)
+        return y
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_ceil_with_0_size_data(test_case):
+        device = random_device()
+        x = random_tensor(4, 2, 1, 0, 3).to(device)
         y = torch.ceil(x)
         return y
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_ceil_with_0shape_0d_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = torch.ceil(x)
+        return y
+
+    @profile(torch.ceil)
+    def profile_ceil(test_case):
+        torch.ceil(torch.ones(4))
+        torch.ceil(torch.ones(100000))
 
 
 if __name__ == "__main__":

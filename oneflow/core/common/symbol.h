@@ -20,9 +20,8 @@ limitations under the License.
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
-#include <glog/logging.h>
 #include "oneflow/core/common/type_traits.h"
-#include "oneflow/core/common/maybe.h"
+#include "oneflow/core/common/check.h"
 #include "oneflow/core/common/hash_eq_trait_ptr.h"
 
 namespace oneflow {
@@ -101,7 +100,7 @@ struct SymbolUtil final {
     if (local_iter != thread_local_symbol_map->end()) { return local_iter->second; }
     const auto& iter = GetIter4ObjectAndHashValue(obj, hash_value);
     (*thread_local_symbol_map)[iter->first] = iter->second;
-    CHECK(ThreadLocalSymbolPtrSet()->emplace(iter->second.get()).second);
+    GLOGCHECK(ThreadLocalSymbolPtrSet()->emplace(iter->second.get()).second);
     return iter->second;
   }
 
@@ -110,7 +109,7 @@ struct SymbolUtil final {
     auto* symbol_map = GlobalSymbolMap();
     std::unique_lock<std::mutex> lock(*GlobalSymbolMapMutex());
     const auto& iter = symbol_map->find(new_obj_ptr_wraper);
-    CHECK(iter != symbol_map->end());
+    GLOGCHECK(iter != symbol_map->end());
     return iter;
   }
 
@@ -127,12 +126,6 @@ struct SymbolUtil final {
 
   static const std::shared_ptr<const T>& GetOrCreatePtr(const T& obj) {
     return LocalThreadGetOr<CreateGlobalSymbol>(obj);
-  }
-  static Maybe<Symbol<T>> GetSymbolByExistedRawPtr(const T* ptr) {
-    CHECK_GT_OR_RETURN(ThreadLocalSymbolPtrSet()->count(ptr), 0) << "ptr: " << ptr;
-    Symbol<T> symbol;
-    symbol.ptr_ = ptr;
-    return symbol;
   }
 };
 

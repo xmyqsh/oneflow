@@ -21,30 +21,30 @@ namespace one {
 
 struct ClipByScalarMinCaptureState : public AutoGradCaptureState {
   bool requires_grad;
-  functional::Scalar min;
+  Scalar min;
 };
 
 class ClipByScalarMin : public OpExprGradFunction<ClipByScalarMinCaptureState> {
  public:
   Maybe<void> Init(const OpExpr& op) override {
     const auto* fw_op_expr = dynamic_cast<const UserOpExpr*>(&op);
-    CHECK_NOTNULL_OR_RETURN(fw_op_expr);
+    CHECK_NOTNULL_OR_RETURN(fw_op_expr);  // NOLINT(maybe-need-error-msg)
     base_attrs_ = MakeAttrMapFromUserOpConf(fw_op_expr->proto());
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Capture(ClipByScalarMinCaptureState* ctx, const TensorTuple& inputs,
                       const TensorTuple& outputs, const AttrMap& attrs) const override {
-    CHECK_EQ_OR_RETURN(inputs.size(), 1);
+    CHECK_EQ_OR_RETURN(inputs.size(), 1);  // NOLINT(maybe-need-error-msg)
     ctx->requires_grad = inputs.at(0)->requires_grad();
     if (!ctx->requires_grad) { return Maybe<void>::Ok(); }
     ctx->SaveTensorForBackward(inputs.at(0));
 
     ComposedAttrMap composed_attrs(attrs, base_attrs_);
     if (IsFloatingDataType(inputs.at(0)->dtype()->data_type())) {
-      ctx->min = functional::Scalar(JUST(composed_attrs.GetAttr<double>("floating_min")));
+      ctx->min = Scalar(JUST(composed_attrs.GetAttr<double>("floating_min")));
     } else if (IsIntegralDataType(inputs.at(0)->dtype()->data_type())) {
-      ctx->min = functional::Scalar(JUST(composed_attrs.GetAttr<int64_t>("integral_min")));
+      ctx->min = Scalar(JUST(composed_attrs.GetAttr<int64_t>("integral_min")));
     } else {
       UNIMPLEMENTED_THEN_RETURN() << "Data type is not floating or integral type.";
     }
@@ -53,12 +53,12 @@ class ClipByScalarMin : public OpExprGradFunction<ClipByScalarMinCaptureState> {
 
   Maybe<void> Apply(const ClipByScalarMinCaptureState* ctx, const TensorTuple& out_grads,
                     TensorTuple* in_grads) const override {
-    CHECK_EQ_OR_RETURN(out_grads.size(), 1);
+    CHECK_EQ_OR_RETURN(out_grads.size(), 1);  // NOLINT(maybe-need-error-msg)
     in_grads->resize(1);
     if (ctx->requires_grad) {
       const auto& x = ctx->SavedTensors().at(0);
       in_grads->at(0) = JUST(functional::ClampGrad(out_grads.at(0), x, ctx->min,
-                                                   /*max=*/Optional<functional::Scalar>()));
+                                                   /*max=*/NullOpt));
     }
     return Maybe<void>::Ok();
   }

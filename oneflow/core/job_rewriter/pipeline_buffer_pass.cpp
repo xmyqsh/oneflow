@@ -17,7 +17,6 @@ limitations under the License.
 #include "oneflow/core/job_rewriter/job_pass.h"
 #include "oneflow/core/job/job.pb.h"
 #include "oneflow/core/job/scope.h"
-#include "oneflow/core/job/scope.cfg.h"
 #include "oneflow/core/job_rewriter/calculation_pass.h"
 #include "oneflow/core/vm/symbol_storage.h"
 #include "oneflow/core/framework/framework.h"
@@ -40,7 +39,11 @@ class PipelineBufferPass final : public JobPass {
     return Apply(op_graph, &job_builder);
   }
 
-  bool IsEnabled(const JobPassCtx& ctx) const { return ctx.job_desc().IsTrain(); }
+  bool IsEnabled(const JobPassCtx& ctx) const {
+    // Pipeline optimization depends on gradient accumulatioin.
+    return ctx.job_desc().IsTrain()
+           && ctx.job_desc().job_conf().num_gradient_accumulation_steps() > 1;
+  }
 
   Maybe<void> Apply(const OpGraph& op_graph, JobBuilder* job_builder) const;
 };
@@ -48,8 +51,8 @@ class PipelineBufferPass final : public JobPass {
 const std::string kBufferOpNamePrefix = "System-Pipeline-Buffer-Op_";
 
 const Scope& Scope4ScopeSymbolId(int64_t scope_symbol_id) {
-  CHECK(Global<symbol::Storage<Scope>>::Get()->Has(scope_symbol_id));
-  return Global<symbol::Storage<Scope>>::Get()->Get(scope_symbol_id);
+  CHECK(Singleton<symbol::Storage<Scope>>::Get()->Has(scope_symbol_id));
+  return Singleton<symbol::Storage<Scope>>::Get()->Get(scope_symbol_id);
 }
 
 const Scope& Scope4OpNode(const OpNode* op_node) {
@@ -114,11 +117,11 @@ void TryInsertOrUseBufferOpToDstNode(
                 ->emplace(buffer_op_name, dst_node->parallel_desc().parallel_conf())
                 .second);
 
-      LOG(INFO) << "\n Insert buffer op : [" << buffer_op_name << "](buffer_size:" << buffer_size
-                << ") \n from [" << src_node->op().op_name()
-                << "] (stage_id:" << std::to_string(src_stage_id) << ") -> ["
-                << dst_node->op().op_name() << "] (stage_id:" << std::to_string(dst_stage_id)
-                << ") \n";
+      VLOG(3) << "\n Insert buffer op : [" << buffer_op_name << "](buffer_size:" << buffer_size
+              << ") \n from [" << src_node->op().op_name()
+              << "] (stage_id:" << std::to_string(src_stage_id) << ") -> ["
+              << dst_node->op().op_name() << "] (stage_id:" << std::to_string(dst_stage_id)
+              << ") \n";
     }
 
     auto mut_op_it = mut_op_name2conf->find(dst_op_name);
@@ -144,13 +147,19 @@ void TryInsertOrUseBufferOpBothSrcDst(
   const OpNode* dst_node = op_edge->dst_node();
   const ParallelDesc& src_parallel_desc = src_node->parallel_desc();
   const ParallelDesc& dst_parallel_desc = dst_node->parallel_desc();
-  CHECK(!src_parallel_desc.EqualsIgnoringHierarchy(dst_parallel_desc));
+  const std::string& src_op_name = src_node->op().op_name();
   const std::string& dst_op_name = dst_node->op().op_name();
   const int64_t src_stage_id = GetStageIdHint(src_node);
   const int64_t dst_stage_id = GetStageIdHint(dst_node);
   CHECK_NE(src_stage_id, dst_stage_id);
   CHECK_GE(src_buffer_size, 1);
   CHECK_GE(dst_buffer_size, 1);
+  CHECK(!src_parallel_desc.EqualsIgnoringHierarchy(dst_parallel_desc))
+      << " Pipeline buffer pass meet ERROR! the src_op: " << src_op_name
+      << " -> dst_op: " << dst_op_name
+      << " with same placement: " << src_parallel_desc.parallel_conf().DebugString()
+      << " , but with different stage id: src_stage_id (" << src_stage_id << ") -> dst_stage_id ("
+      << dst_stage_id << "). Please check your stage id config for modules.";
   for (const LogicalBlobId& lbi : op_edge->lbis()) {
     std::string lbn = GenLogicalBlobName(lbi);
     std::string src_buffer_op_name =
@@ -203,12 +212,11 @@ void TryInsertOrUseBufferOpBothSrcDst(
       mut_op_it = mut_op_name2conf->emplace(dst_op_name, dst_node->op().op_conf()).first;
     }
 
-    LOG(INFO) << "\n Insert buffer op pair : src_buffer = <" << src_buffer_op_name
-              << ">(buffer_size:" << src_buffer_size << ") , dst_buffer = <" << dst_buffer_op_name
-              << ">(buffer_size:" << dst_buffer_size << ") \n from [" << src_node->op().op_name()
-              << "] (stage_id:" << std::to_string(src_stage_id) << ") -> ["
-              << dst_node->op().op_name() << "] (stage_id:" << std::to_string(dst_stage_id)
-              << ") \n";
+    VLOG(3) << "\n Insert buffer op pair : src_buffer = <" << src_buffer_op_name
+            << ">(buffer_size:" << src_buffer_size << ") , dst_buffer = <" << dst_buffer_op_name
+            << ">(buffer_size:" << dst_buffer_size << ") \n from [" << src_node->op().op_name()
+            << "] (stage_id:" << std::to_string(src_stage_id) << ") -> ["
+            << dst_node->op().op_name() << "] (stage_id:" << std::to_string(dst_stage_id) << ") \n";
 
     const std::string dst_buffer_out = user_op::UserOpConfWrapper(dst_conf).output("out", 0);
     for (const std::string& ibn : op_edge->lbi2ibns().at(lbi)) {
@@ -220,10 +228,6 @@ void TryInsertOrUseBufferOpBothSrcDst(
 }
 
 Maybe<void> PipelineBufferPass::Apply(const OpGraph& op_graph, JobBuilder* job_builder) const {
-  if (GlobalJobDesc().job_conf().num_gradient_accumulation_steps() <= 1) {
-    return Maybe<void>::Ok();
-  }
-
   int64_t max_stage_id = 0;
   op_graph.ForEachNode([&](const OpNode* this_node) {
     if (!OpNodeHasScope(this_node)) {
@@ -235,7 +239,7 @@ Maybe<void> PipelineBufferPass::Apply(const OpGraph& op_graph, JobBuilder* job_b
 
   if (max_stage_id == 0) { return Maybe<void>::Ok(); }
   const int64_t total_stage_num = max_stage_id + 1;
-  LOG(INFO) << "total stage num = " << total_stage_num;
+  VLOG(3) << "total stage num = " << total_stage_num;
 
   HashMap<std::string, OperatorConf> buffer_op_name2op_conf;
   HashMap<std::string, ParallelConf> buffer_op_name2parallel_conf;
@@ -255,10 +259,13 @@ Maybe<void> PipelineBufferPass::Apply(const OpGraph& op_graph, JobBuilder* job_b
           continue; /* last stage(loss) does NOT need to insert buffer */
         }
         if (src_stage_id != dst_stage_id) {
-          LOG(WARNING) << " Cross diff stage link From: [" << src_node->op().op_conf().DebugString()
-                       << "](stage_id:" << std::to_string(src_stage_id) << ") -> ["
-                       << this_node->op().op_conf().DebugString()
-                       << "](stage_id:" << std::to_string(dst_stage_id) << ")\n";
+          LOG(WARNING)
+              << " Cross diff stage link From: [" << src_node->op().op_conf().DebugString()
+              << "](stage_id:" << std::to_string(src_stage_id) << ") -> ["
+              << this_node->op().op_conf().DebugString()
+              << "](stage_id:" << std::to_string(dst_stage_id)
+              << "). Make sure to change the tensor's placement before it enter the module "
+                 "of a next pipeline stage.\n";
         }
         const int64_t buffer_size = total_stage_num * 2; /* NOTE(chengcheng): max buffer size */
         TryInsertOrUseBufferOpToDstNode(in_edge, buffer_size, &buffer_op_name2op_conf,
@@ -284,8 +291,8 @@ Maybe<void> PipelineBufferPass::Apply(const OpGraph& op_graph, JobBuilder* job_b
       const int64_t src_stage_id = GetStageIdHint(src_node);
       const int64_t dst_stage_id = GetStageIdHint(dst_node);
       if (src_node->parallel_desc().device_type() == DeviceType::kCPU
-          && dst_node->parallel_desc().device_type() == DeviceType::kGPU) {
-        if (src_stage_id == 0 && (dst_stage_id == max_stage_id || dst_stage_id == 0)) {
+          && dst_node->parallel_desc().device_type() == DeviceType::kCUDA) {
+        if (src_stage_id == 0 && dst_stage_id == max_stage_id) {
           TryInsertOrUseBufferOpToDstNode(edge, total_stage_num * 2, &buffer_op_name2op_conf,
                                           &buffer_op_name2parallel_conf, &mut_op_name2conf);
           return;

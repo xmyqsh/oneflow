@@ -18,19 +18,19 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
 
 
 def _test_broadcast_like(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.ones(shape=(3, 1, 1), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
     )
-    like_tensor = flow.Tensor(
+    like_tensor = flow.tensor(
         np.ones(shape=(3, 3, 3), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
@@ -40,13 +40,61 @@ def _test_broadcast_like(test_case, device):
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
 
 
+def _test_broadcast_like_one(test_case, device):
+    input = flow.tensor(
+        np.ones(shape=(1, 1), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    like_tensor = flow.tensor(
+        np.ones(shape=(1, 2, 3), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    of_out = flow.broadcast_like(input, like_tensor)
+    np_out = np.ones(shape=(1, 2, 3))
+    test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
+
+
+def _test_broadcast_like_different_dim(test_case, device):
+    input = flow.tensor(
+        np.ones(shape=(3, 1), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    like_tensor = flow.tensor(
+        np.ones(shape=(2, 3, 4), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    of_out = flow.broadcast_like(input, like_tensor)
+    np_out = np.ones(shape=(2, 3, 4))
+    test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
+
+
+def _test_broadcast_like_different_dim_with_input_axisvec(test_case, device):
+    input = flow.tensor(
+        np.ones(shape=(1, 5, 6), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    like_tensor = flow.tensor(
+        np.ones(shape=(1, 5, 6, 1, 6), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    of_out = flow.broadcast_like(input, like_tensor, broadcast_axes=(3, 4))
+    np_out = np.ones(shape=(1, 5, 6, 1, 6))
+    test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
+
+
 def _test_broadcast_like_3dim(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.ones(shape=(1, 3, 2), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
     )
-    like_tensor = flow.Tensor(
+    like_tensor = flow.tensor(
         np.ones(shape=(3, 3, 2), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
@@ -57,12 +105,12 @@ def _test_broadcast_like_3dim(test_case, device):
 
 
 def _test_broadcast_like_4dim(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.ones(shape=(1, 3, 2, 1), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
     )
-    like_tensor = flow.Tensor(
+    like_tensor = flow.tensor(
         np.ones(shape=(3, 3, 2, 3), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
@@ -72,14 +120,30 @@ def _test_broadcast_like_4dim(test_case, device):
     test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
 
 
+def _test_broadcast_like_empty_axisvec(test_case, device):
+    input = flow.tensor(
+        np.ones(shape=(1), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    like_tensor = flow.tensor(
+        np.ones(shape=(2, 3, 4), dtype=np.float32),
+        dtype=flow.float32,
+        device=flow.device(device),
+    )
+    of_out = flow.broadcast_like(input, like_tensor)
+    np_out = np.ones(shape=(2, 3, 4))
+    test_case.assertTrue(np.allclose(of_out.numpy(), np_out, 1e-05, 1e-05))
+
+
 def _test_broadcast_like_backward(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.ones(shape=(3, 1, 1), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
         requires_grad=True,
     )
-    like_tensor = flow.Tensor(
+    like_tensor = flow.tensor(
         np.ones(shape=(3, 3, 3), dtype=np.float32),
         dtype=flow.float32,
         device=flow.device(device),
@@ -98,8 +162,12 @@ class TestBroadCastLike(flow.unittest.TestCase):
         arg_dict = OrderedDict()
         arg_dict["test_fun"] = [
             _test_broadcast_like,
+            _test_broadcast_like_one,
+            _test_broadcast_like_different_dim,
+            _test_broadcast_like_different_dim_with_input_axisvec,
             _test_broadcast_like_3dim,
             _test_broadcast_like_4dim,
+            _test_broadcast_like_empty_axisvec,
             _test_broadcast_like_backward,
         ]
         arg_dict["device"] = ["cpu", "cuda"]

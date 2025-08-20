@@ -18,8 +18,9 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from automated_test_util import *
-from test_util import GenArgList
+
+from oneflow.test_utils.automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
@@ -43,7 +44,7 @@ def _test_linear_no_bias(test_case, device):
     )
     np_weight = np.ones((3, 8)).astype(np.float32)
     np_weight.fill(2.3)
-    x = flow.Tensor(input_arr, device=flow.device(device))
+    x = flow.tensor(input_arr, dtype=flow.float32, device=flow.device(device))
     flow.nn.init.constant_(linear.weight, 2.3)
     of_out = linear(x)
     np_out = np.matmul(input_arr, np_weight)
@@ -70,7 +71,7 @@ def _test_linear_with_bias(test_case, device):
     np_weight.fill(2.068758)
     np_bias = np.ones(8)
     np_bias.fill(0.23)
-    x = flow.Tensor(input_arr, device=flow.device(device))
+    x = flow.tensor(input_arr, dtype=flow.float32, device=flow.device(device))
     flow.nn.init.constant_(linear.weight, 2.068758)
     flow.nn.init.constant_(linear.bias, 0.23)
     of_out = linear(x)
@@ -81,7 +82,7 @@ def _test_linear_with_bias(test_case, device):
 
 def _test_linear_3_dimension_input(test_case, device):
     input_arr = np.random.randn(2, 3, 4)
-    x = flow.Tensor(input_arr, device=flow.device(device))
+    x = flow.tensor(input_arr, dtype=flow.float32, device=flow.device(device))
     linear = flow.nn.Linear(4, 5, True)
     linear = linear.to(device)
     flow.nn.init.constant_(linear.weight, 5.6)
@@ -98,7 +99,7 @@ def _test_linear_3_dimension_input(test_case, device):
 
 def _test_linear_4_dimension_input(test_case, device):
     input_arr = np.random.randn(4, 5, 6, 7)
-    x = flow.Tensor(input_arr, device=flow.device(device))
+    x = flow.tensor(input_arr, dtype=flow.float32, device=flow.device(device))
     linear = flow.nn.Linear(7, 3, False)
     linear = linear.to(device)
     flow.nn.init.constant_(linear.weight, 11.3)
@@ -112,7 +113,9 @@ def _test_linear_4_dimension_input(test_case, device):
 def _test_identity(test_case, device):
     linear = flow.nn.Identity(54, unused_argument1=0.1, unused_argument2=False)
     linear = linear.to(device)
-    x = flow.Tensor(np.random.rand(2, 3, 4, 5), device=flow.device(device))
+    x = flow.tensor(
+        np.random.rand(2, 3, 4, 5), dtype=flow.float32, device=flow.device(device)
+    )
     y = linear(x)
     test_case.assertTrue(np.array_equal(x.numpy(), y.numpy()))
 
@@ -120,7 +123,7 @@ def _test_identity(test_case, device):
 def _test_linear_backward_with_bias(test_case, device):
     linear = flow.nn.Linear(3, 8)
     linear = linear.to(device)
-    x = flow.Tensor(
+    x = flow.tensor(
         [
             [-0.94630778, -0.83378579, -0.87060891],
             [2.0289922, -0.28708987, -2.18369248],
@@ -131,6 +134,7 @@ def _test_linear_backward_with_bias(test_case, device):
             [-0.22556897, 0.74798368, 0.90416439],
             [0.48339456, -2.32742195, -0.59321527],
         ],
+        dtype=flow.float32,
         device=flow.device(device),
         requires_grad=True,
     )
@@ -176,7 +180,7 @@ class TestLinear(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest()
+    @autotest(n=5, rtol=1e-2)
     def test_linear_with_random_data(test_case):
         input_size = random()
         m = torch.nn.Linear(
@@ -185,11 +189,48 @@ class TestLinear(flow.unittest.TestCase):
         m.train(random())
         device = random_device()
         m.to(device)
-        x = random_pytorch_tensor(ndim=2, dim1=input_size).to(device)
+        x = random_tensor(ndim=2, dim1=input_size).to(device)
         y = m(x)
         return y
 
-    @autotest()
+    @autotest(n=5, rtol=1e-2, atol=1e-4)
+    def test_linear_with_device_and_dtype(test_case):
+        input_size = random()
+        device = random_device()
+        m = torch.nn.Linear(
+            in_features=input_size,
+            out_features=random(),
+            bias=random() | nothing(),
+            device=device,
+            dtype=torch.float,
+        )
+        m.train(random())
+        m.to(device)
+        x = random_tensor(ndim=2, dim1=input_size).to(device)
+        y = m(x)
+        return y
+
+    @autotest(n=5, rtol=1e-3)
+    def test_nn_functional_linear_with_random_data(test_case):
+        input_size = random()
+        device = random_device()
+        x = random_tensor(ndim=2, dim1=input_size).to(device)
+        weight = random_tensor(ndim=2, dim1=input_size).to(device)
+        y = torch.nn.functional.linear(x, weight)
+        return y
+
+    @autotest(n=5, rtol=1e-2)
+    def test_nn_functional_bias_linear_with_random_data(test_case):
+        input_size = random()
+        bias_size = random()
+        device = random_device()
+        x = random_tensor(ndim=2, dim1=input_size).to(device)
+        weight = random_tensor(ndim=2, dim0=bias_size, dim1=input_size).to(device)
+        bias = random_tensor(ndim=1, dim0=bias_size).to(device)
+        y = torch.nn.functional.linear(x, weight, bias)
+        return y
+
+    @autotest(n=5)
     def test_identity_with_random_data(test_case):
         m = torch.nn.Identity(
             x=random().to(int),
@@ -199,7 +240,7 @@ class TestLinear(flow.unittest.TestCase):
         m.train(random())
         device = random_device()
         m.to(device)
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = m(x)
         return y
 

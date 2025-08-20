@@ -18,6 +18,7 @@ limitations under the License.
 #include "oneflow/core/operator/operator.h"
 #include "oneflow/core/register/blob_desc.h"
 #include "oneflow/core/framework/user_op_def.h"
+#include "oneflow/core/framework/attr_value.h"
 #include "oneflow/core/framework/attr_value_accessor.h"
 
 namespace oneflow {
@@ -83,7 +84,7 @@ int32_t UserOpConfWrapper::output_size(const std::string& arg_name) const {
 const std::shared_ptr<const AttrVal>& UserOpConfWrapper::Attr4Name(
     const std::string& attr_name) const {
   const auto& attr = attrs_.Attr4Name(attr_name);
-  CHECK_NOTNULL(attr.get());
+  CHECK(attr.get() != nullptr) << "attr_name: " << attr_name;
   return attr;
 }
 
@@ -123,47 +124,6 @@ UserOpWrapper::UserOpWrapper(
   InitTensorDescFromOpArgs(op.user_conf().output());
 }
 
-bool UserOpWrapper::NeedGenGradTensor4OpInput(const std::string& input_arg_name,
-                                              int32_t index) const {
-  auto it = op_conf().user_conf().input().find(input_arg_name);
-  CHECK(it != op_conf().user_conf().input().end())
-      << "arg_name: " << input_arg_name << ", index: " << index;
-  CHECK(index >= 0 && index < it->second.s_size())
-      << "arg_name: " << input_arg_name << ", index: " << index;
-  return diff_fn_(GenRepeatedBn(input_arg_name, index)) != nullptr;
-}
-
-bool UserOpWrapper::HasGradTensor4OpOutput(const std::string& output_arg_name,
-                                           int32_t index) const {
-  auto it = op_conf().user_conf().output().find(output_arg_name);
-  CHECK(it != op_conf().user_conf().output().end())
-      << "arg_name: " << output_arg_name << ", index: " << index;
-  CHECK(index >= 0 && index < it->second.s_size())
-      << "arg_name: " << output_arg_name << ", index: " << index;
-  return diff_fn_(GenRepeatedBn(output_arg_name, index)) != nullptr;
-}
-
-std::string UserOpWrapper::output_grad(const std::string& output_arg_name, int32_t index) const {
-  auto it = op_conf().user_conf().output().find(output_arg_name);
-  CHECK(it != op_conf().user_conf().output().end())
-      << "arg_name: " << output_arg_name << ", index: " << index;
-  CHECK(index >= 0 && index < it->second.s_size())
-      << "arg_name: " << output_arg_name << ", index: " << index;
-  return GenLogicalBlobName(*diff_fn_(GenRepeatedBn(output_arg_name, index)));
-}
-
-std::string UserOpWrapper::GetGradTensorWithOpOutput(const std::string& output_arg_name,
-                                                     int32_t index) const {
-  return output_grad(output_arg_name, index);
-}
-
-void UserOpWrapper::BindGradTensorWithOpInput(const std::string& logical_grad_blob_name,
-                                              const std::string& input_arg_name,
-                                              int32_t index) const {
-  CHECK(NeedGenGradTensor4OpInput(input_arg_name, index));
-  *diff_fn_(GenRepeatedBn(input_arg_name, index)) = GenLogicalBlobId(logical_grad_blob_name);
-}
-
 const TensorDesc& UserOpWrapper::arg_tensor_desc(const std::string& arg_name, int32_t index) const {
   std::string bn = GenRepeatedBn(arg_name, index);
   CHECK(bn2tensor_desc_.find(bn) != bn2tensor_desc_.end());
@@ -175,16 +135,11 @@ const TensorDesc& UserOpWrapper::TensorDesc4ArgNameAndIndex(const std::string& a
   return arg_tensor_desc(arg_name, index);
 }
 
-void UserOpWrapper::InputGradBind(const user_op::OpArg& input,
-                                  const UserOpInputGradGetFn& grad_fn) {
-  if (NeedGenGradTensor4OpInput(input.name(), input.index())) {
-    BindGradTensorWithOpInput(grad_fn(), input.name(), input.index());
-  }
-}
-
 UserOpConfWrapperBuilder& UserOpConfWrapperBuilder::InputBind(
     const std::string& arg_name, const std::string& logical_blob_name) {
-  input_[arg_name].push_back(logical_blob_name);
+  if (input_.find(arg_name) == input_.end()) { input_order_.emplace_back(arg_name); }
+  input_[arg_name].emplace_back(logical_blob_name);
+  CHECK_EQ(input_.size(), input_order_.size());
   return *this;
 }
 
@@ -200,11 +155,13 @@ UserOpConfWrapperBuilder& UserOpConfWrapperBuilder::Output(const std::string& ar
 UserOpConfWrapperBuilder& UserOpConfWrapperBuilder::Output(const std::string& arg_name,
                                                            int32_t num) {
   CHECK(num >= 0);
+  if (output_.find(arg_name) == output_.end()) { output_order_.emplace_back(arg_name); }
   output_[arg_name].resize(num);
   for (int32_t i = 0; i < num; ++i) {
     std::string bn = GenRepeatedBn(arg_name, i);
     output_[arg_name].at(i) = GenLogicalBlobName(op_name_, bn);
   }
+  CHECK_EQ(output_.size(), output_order_.size());
   return *this;
 }
 
@@ -213,9 +170,15 @@ UserOpConfWrapperBuilder& UserOpConfWrapperBuilder::ScopeSymbolId(int64_t scope_
   return *this;
 }
 
+UserOpConfWrapperBuilder& UserOpConfWrapperBuilder::DeviceTag(const std::string& device_tag) {
+  device_tag_ = device_tag;
+  return *this;
+}
+
 UserOpConfWrapper UserOpConfWrapperBuilder::Build() {
   OperatorConf op_conf;
   op_conf.set_name(op_name_);
+  if (!device_tag_.empty()) { op_conf.set_device_tag(device_tag_); }
   if (scope_symbol_id_.has_value()) { op_conf.set_scope_symbol_id(scope_symbol_id_.value()); }
   UserOpConf* user_conf = op_conf.mutable_user_conf();
   user_conf->set_op_type_name(op_type_name_);
@@ -227,36 +190,11 @@ UserOpConfWrapper UserOpConfWrapperBuilder::Build() {
   };
   GenArgs(input_, user_conf->mutable_input());
   GenArgs(output_, user_conf->mutable_output());
+  for (const auto& arg_name : input_order_) { user_conf->add_input_order(arg_name); }
+  for (const auto& arg_name : output_order_) { user_conf->add_output_order(arg_name); }
   for (const auto& pair : attr_) { (*user_conf->mutable_attr())[pair.first] = pair.second; }
   wrapper_ = UserOpConfWrapper(*CHECK_JUST(CheckAndCompleteUserOpConfImpl(op_conf)));
   return wrapper_;
-}
-
-void BackwardOpConfContext::DefineOp(const std::string& op_name, const BackwardOpBuilderFn& fn) {
-  auto it = op_builder_fns_.find(op_name);
-  CHECK(it == op_builder_fns_.end()) << " op_name " << op_name << " has been defined.";
-  op_builder_fns_[op_name] = fn;
-}
-
-UserOpConfWrapper& BackwardOpConfContext::GetOp(const std::string& op_name) {
-  auto it = op_builder_results_.find(op_name);
-  if (it != op_builder_results_.end()) {
-    // return result from cache
-    return it->second;
-  } else {
-    // build and put result into cache
-    auto fn_it = op_builder_fns_.find(op_name);
-    CHECK(fn_it != op_builder_fns_.end()) << " op_name " << op_name << " has no builder function.";
-    CHECK(fn_it->second != nullptr) << " op_name " << op_name << " builder function is null.";
-    UserOpConfWrapperBuilder builder(op_name);
-    auto ret = op_builder_results_.emplace(std::make_pair(op_name, fn_it->second(builder)));
-    CHECK(ret.second == true) << " op_name " << op_name << " build result insert failed.";
-
-    // add new op conf
-    bw_op_confs_->push_back(ret.first->second.op_conf());
-
-    return ret.first->second;
-  }
 }
 
 }  // namespace user_op
@@ -272,17 +210,11 @@ Maybe<void> CheckArgDefIsValidInUserOpConf(
     if (arg_name2lbns.find(arg.name()) != arg_name2lbns.end()) {
       arg_blob_num = arg_name2lbns.at(arg.name()).s_size();
     }
-    if (arg_blob_num != arg.num()) {
-      if (arg_blob_num == 0) {
-        CHECK_OR_RETURN(arg.is_optional())
-            << " op_name: " << op_name << " op_type_name: " << op_type_name
-            << " arg name: " << arg.name() << " in OpDef must have blob in op_conf";
-      } else {
-        CHECK_OR_RETURN(arg_blob_num > arg.num() && arg.num_as_min())
-            << " op_name: " << op_name << " op_type_name: " << op_type_name
-            << " arg name: " << arg.name() << " has blob num: " << arg_blob_num
-            << " in op_conf does not meet its constraints in OpDef";
-      }
+    if (arg_blob_num == 0) {
+      CHECK_OR_RETURN(arg.is_optional())
+          << " op_name: " << op_name << " op_type_name: " << op_type_name
+          << " arg name: " << arg.name() << " in OpDef must have blob in op_conf: \n"
+          << op_conf.DebugString();
     }
     op_def_arg_names.insert(arg.name());
   }
@@ -290,6 +222,21 @@ Maybe<void> CheckArgDefIsValidInUserOpConf(
     CHECK_OR_RETURN(op_def_arg_names.find(pair.first) != op_def_arg_names.end())
         << " op_name: " << op_name << " op_type_name: " << op_type_name
         << " has not arg name: " << pair.first << " in OpDef";
+  }
+  return Maybe<void>::Ok();
+}
+
+Maybe<void> CheckUserOpConfArgOrderValid(
+    const OperatorConf& op_conf, const PbMap<std::string, UserOpConf_ListString>& arg_name2lbns,
+    const PbRpf<std::string>& arg_order) {
+  CHECK_EQ_OR_RETURN(arg_name2lbns.size(), arg_order.size())
+      << " op_conf: " << op_conf.DebugString() << " io order is not valid.";
+  HashSet<std::string> arg_names;
+  for (const std::string& arg_name : arg_order) {
+    CHECK_OR_RETURN(arg_names.insert(arg_name).second)
+        << " op_conf: " << op_conf.DebugString() << " io order is not valid.";
+    CHECK_OR_RETURN(arg_name2lbns.find(arg_name) != arg_name2lbns.end())
+        << " op_conf: " << op_conf.DebugString() << " io order is not valid.";
   }
   return Maybe<void>::Ok();
 }
@@ -337,22 +284,6 @@ Maybe<void> AddAttrDefaultValueAndCheckValid(const UserOpDef& op_def, OperatorCo
   return AddAttrDefaultValueAndCheckValid(op_def, user_conf, error_msg_prefix);
 }
 
-Maybe<void> AddUserOpConfOutputDefaultArg(const UserOpDef& op_def, OperatorConf* op_conf) {
-  UserOpConf* user_conf = op_conf->mutable_user_conf();
-  // add default output arg and lbn
-  for (const auto& output_arg : op_def.output()) {
-    if (user_conf->output().find(output_arg.name()) == user_conf->output().end()
-        && (!output_arg.is_optional()) && (!output_arg.num_as_min())) {
-      for (int32_t i = 0; i < output_arg.num(); ++i) {
-        std::string lbn = GenLogicalBlobName(op_conf->name(), GenRepeatedBn(output_arg.name(), i));
-        (*(user_conf->mutable_output()))[output_arg.name()].add_s(lbn);
-        CHECK_EQ(i + 1, user_conf->output().at(output_arg.name()).s_size());
-      }
-    }
-  }
-  return Maybe<void>::Ok();
-}
-
 Maybe<long long> GetAttrTypeImpl(const std::string& op_type_name, const std::string& attr_name) {
   const user_op::OpRegistryResult* val =
       user_op::UserOpRegistryMgr::Get().GetOpRegistryResult(op_type_name);
@@ -374,10 +305,11 @@ Maybe<OperatorConf> CheckAndCompleteUserOpConfImpl(const OperatorConf& op_conf) 
   const UserOpDef& op_def = val->op_def;
 
   JUST(AddAttrDefaultValueAndCheckValid(op_def, &ret));
-  JUST(AddUserOpConfOutputDefaultArg(op_def, &ret));
   // check input and output valid
   JUST(CheckArgDefIsValidInUserOpConf(op_conf, user_conf->input(), op_def.input()));
   JUST(CheckArgDefIsValidInUserOpConf(op_conf, user_conf->output(), op_def.output()));
+  JUST(CheckUserOpConfArgOrderValid(op_conf, user_conf->input(), user_conf->input_order()));
+  JUST(CheckUserOpConfArgOrderValid(op_conf, user_conf->output(), user_conf->output_order()));
   // check attr valid by user
   JUST(val->check_fn(user_op::UserOpDefWrapper(op_def), user_op::UserOpConfWrapper(ret)));
   return ret;

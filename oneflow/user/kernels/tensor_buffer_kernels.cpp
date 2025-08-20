@@ -31,9 +31,9 @@ class TensorBufferToTensorKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out = ctx->Tensor4ArgNameAndIndex("out", 0);
-    const ShapeView& in_shape = in->shape();
+    const ShapeView& in_shape = in->shape_view();
     CHECK_EQ(in->data_type(), DataType::kTensorBuffer);
-    const ShapeView& out_shape = out->shape();
+    const ShapeView& out_shape = out->shape_view();
     const auto& instance_shape = ctx->Attr<Shape>("instance_shape");
     CHECK_EQ(out_shape.NumAxes(), in_shape.NumAxes() + instance_shape.NumAxes());
     FOR_RANGE(int64_t, i, 0, in_shape.NumAxes()) { CHECK_EQ(out_shape.At(i), in_shape.At(i)); }
@@ -49,9 +49,9 @@ class TensorBufferToTensorKernel final : public user_op::OpKernel {
       const TensorBuffer* tensor_buffer = in_ptr + i;
       CHECK_EQ(tensor_buffer->nbytes(), instance_size);
       CHECK_EQ(tensor_buffer->data_type(), data_type);
-      CHECK(tensor_buffer->shape() == instance_shape);
-      Memcpy<DeviceType::kCPU>(ctx->device_ctx(), out_ptr + i * instance_size,
-                               tensor_buffer->data(), instance_size);
+      CHECK(tensor_buffer->shape_view() == instance_shape);
+      Memcpy<DeviceType::kCPU>(ctx->stream(), out_ptr + i * instance_size, tensor_buffer->data(),
+                               instance_size);
     });
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
@@ -59,8 +59,8 @@ class TensorBufferToTensorKernel final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("tensor_buffer_to_tensor")
     .SetCreateFn<TensorBufferToTensorKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == DataType::kTensorBuffer));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == DataType::kTensorBuffer));
 
 class TensorToTensorBufferKernel final : public user_op::OpKernel {
  public:
@@ -71,8 +71,8 @@ class TensorToTensorBufferKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out = ctx->Tensor4ArgNameAndIndex("out", 0);
-    const ShapeView& in_shape = in->shape();
-    const ShapeView& out_shape = out->shape();
+    const ShapeView& in_shape = in->shape_view();
+    const ShapeView& out_shape = out->shape_view();
     const auto instance_dims = ctx->Attr<int32_t>("instance_dims");
     CHECK_LT(instance_dims, in_shape.NumAxes());
     FOR_RANGE(int64_t, i, 0, in_shape.NumAxes() - instance_dims) {
@@ -80,11 +80,11 @@ class TensorToTensorBufferKernel final : public user_op::OpKernel {
     }
     DimVector instance_dim_vec;
     FOR_RANGE(int64_t, i, in_shape.NumAxes() - instance_dims, in_shape.NumAxes()) {
-      instance_dim_vec.push_back(in_shape.At(i));
+      instance_dim_vec.emplace_back(in_shape.At(i));
     }
     const Shape instance_shape(instance_dim_vec);
     const auto data_type = in->data_type();
-    CHECK(IsPODDataType(data_type));
+    CHECK(IsTriviallyCopyableDataType(data_type));
     const int64_t instance_size = instance_shape.elem_cnt() * GetSizeOfDataType(data_type);
     const auto* in_ptr = in->dptr<char>();
     auto* out_ptr = out->mut_dptr<TensorBuffer>();
@@ -92,8 +92,8 @@ class TensorToTensorBufferKernel final : public user_op::OpKernel {
       TensorBuffer* tensor_buffer = out_ptr + i;
       tensor_buffer->Resize(instance_shape, data_type);
       CHECK_EQ(tensor_buffer->nbytes(), instance_size);
-      Memcpy<DeviceType::kCPU>(ctx->device_ctx(), tensor_buffer->mut_data(),
-                               in_ptr + i * instance_size, instance_size);
+      Memcpy<DeviceType::kCPU>(ctx->stream(), tensor_buffer->mut_data(), in_ptr + i * instance_size,
+                               instance_size);
     });
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
@@ -101,8 +101,8 @@ class TensorToTensorBufferKernel final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("tensor_to_tensor_buffer")
     .SetCreateFn<TensorToTensorBufferKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("out", 0) == DataType::kTensorBuffer));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("out", 0) == DataType::kTensorBuffer));
 
 template<typename T>
 class GenTensorBuffer final : public user_op::OpKernel {
@@ -129,11 +129,11 @@ class GenTensorBuffer final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_GEN_TENSOR_BUFFER_KERNEL(dtype)                     \
-  REGISTER_USER_KERNEL("gen_tensor_buffer")                          \
-      .SetCreateFn<GenTensorBuffer<dtype>>()                         \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kCPU) \
-                       & (user_op::HobAttr<DataType>("data_type") == GetDataType<dtype>::value));
+#define REGISTER_GEN_TENSOR_BUFFER_KERNEL(dtype)                      \
+  REGISTER_USER_KERNEL("gen_tensor_buffer")                           \
+      .SetCreateFn<GenTensorBuffer<dtype>>()                          \
+      .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU) \
+                       && (user_op::HobAttr<DataType>("data_type") == GetDataType<dtype>::value));
 
 REGISTER_GEN_TENSOR_BUFFER_KERNEL(int32_t)
 REGISTER_GEN_TENSOR_BUFFER_KERNEL(int64_t)
@@ -150,23 +150,23 @@ class TensorBufferToListOfTensors final : public user_op::OpKernel {
  private:
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
-    CHECK_GT(in->shape().elem_cnt(), 0);
+    CHECK_GT(in->shape_view().elem_cnt(), 0);
     CHECK_EQ(in->data_type(), DataType::kTensorBuffer);
     const DataType out_dtype = ctx->Attr<DataType>("out_dtype");
-    CHECK(IsPODDataType(out_dtype));
+    CHECK(IsTriviallyCopyableDataType(out_dtype));
     const bool dynamic_out = ctx->Attr<bool>("dynamic_out");
     const auto* in_ptr = in->dptr<TensorBuffer>();
-    MultiThreadLoop(in->shape().elem_cnt(), [&](size_t i) {
+    MultiThreadLoop(in->shape_view().elem_cnt(), [&](size_t i) {
       const TensorBuffer* tensor_buffer = in_ptr + i;
       user_op::Tensor* out_i = ctx->Tensor4ArgNameAndIndex("out", i);
       CHECK_EQ(out_dtype, tensor_buffer->data_type());
       if (dynamic_out) {
-        CHECK_LE(tensor_buffer->shape().elem_cnt(), out_i->shape().elem_cnt());
-        out_i->mut_shape()->set_shape(tensor_buffer->shape());
+        CHECK_LE(tensor_buffer->shape_view().elem_cnt(), out_i->shape_view().elem_cnt());
+        out_i->mut_shape_view().set_shape(tensor_buffer->shape_view());
       } else {
-        CHECK_EQ(tensor_buffer->shape().elem_cnt(), out_i->shape().elem_cnt());
+        CHECK_EQ(tensor_buffer->shape_view().elem_cnt(), out_i->shape_view().elem_cnt());
       }
-      Memcpy<DeviceType::kCPU>(ctx->device_ctx(), out_i->mut_dptr<void>(), tensor_buffer->data(),
+      Memcpy<DeviceType::kCPU>(ctx->stream(), out_i->mut_dptr<void>(), tensor_buffer->data(),
                                tensor_buffer->nbytes());
     });
   }
@@ -175,8 +175,8 @@ class TensorBufferToListOfTensors final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("tensor_buffer_to_list_of_tensors")
     .SetCreateFn<TensorBufferToListOfTensors>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == DataType::kTensorBuffer));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == DataType::kTensorBuffer));
 
 class TensorBufferToListOfTensorsV2 final : public user_op::OpKernel {
  public:
@@ -186,23 +186,23 @@ class TensorBufferToListOfTensorsV2 final : public user_op::OpKernel {
  private:
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
-    CHECK_GT(in->shape().elem_cnt(), 0);
+    CHECK_GT(in->shape_view().elem_cnt(), 0);
     CHECK_EQ(in->data_type(), DataType::kTensorBuffer);
     const std::vector<DataType>& out_dtypes = ctx->Attr<std::vector<DataType>>("out_dtypes");
     const bool dynamic_out = ctx->Attr<bool>("dynamic_out");
     const auto* in_ptr = in->dptr<TensorBuffer>();
-    MultiThreadLoop(in->shape().elem_cnt(), [&](size_t i) {
-      CHECK(IsPODDataType(out_dtypes[i]));
+    MultiThreadLoop(in->shape_view().elem_cnt(), [&](size_t i) {
+      CHECK(IsTriviallyCopyableDataType(out_dtypes[i]));
       const TensorBuffer* tensor_buffer = in_ptr + i;
       user_op::Tensor* out_i = ctx->Tensor4ArgNameAndIndex("out", i);
       CHECK_EQ(out_dtypes[i], tensor_buffer->data_type());
       if (dynamic_out) {
-        CHECK_LE(tensor_buffer->shape().elem_cnt(), out_i->shape().elem_cnt());
-        out_i->mut_shape()->set_shape(tensor_buffer->shape());
+        CHECK_LE(tensor_buffer->shape_view().elem_cnt(), out_i->shape_view().elem_cnt());
+        out_i->mut_shape_view().set_shape(tensor_buffer->shape_view());
       } else {
-        CHECK_EQ(tensor_buffer->shape().elem_cnt(), out_i->shape().elem_cnt());
+        CHECK_EQ(tensor_buffer->shape_view().elem_cnt(), out_i->shape_view().elem_cnt());
       }
-      Memcpy<DeviceType::kCPU>(ctx->device_ctx(), out_i->mut_dptr<void>(), tensor_buffer->data(),
+      Memcpy<DeviceType::kCPU>(ctx->stream(), out_i->mut_dptr<void>(), tensor_buffer->data(),
                                tensor_buffer->nbytes());
     });
   }
@@ -211,8 +211,8 @@ class TensorBufferToListOfTensorsV2 final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("tensor_buffer_to_list_of_tensors_v2")
     .SetCreateFn<TensorBufferToListOfTensorsV2>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == DataType::kTensorBuffer));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == DataType::kTensorBuffer));
 
 }  // namespace
 

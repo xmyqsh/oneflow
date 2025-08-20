@@ -18,14 +18,14 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
 
 
 def _test_interpolate_linear_1d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 5).reshape((1, 1, 4)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -73,7 +73,7 @@ def _test_interpolate_linear_1d(test_case, device):
 
 
 def _test_interpolate_nearest_1d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 5).reshape((1, 1, 4)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -89,7 +89,7 @@ def _test_interpolate_nearest_1d(test_case, device):
 
 
 def _test_interpolate_nearest_2d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 5).reshape((1, 1, 2, 2)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -116,7 +116,7 @@ def _test_interpolate_nearest_2d(test_case, device):
 
 
 def _test_interpolate_nearest_3d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 9).reshape((1, 1, 2, 2, 2)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -163,7 +163,7 @@ def _test_interpolate_nearest_3d(test_case, device):
 
 
 def _test_interpolate_bilinear_2d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 5).reshape((1, 1, 2, 2)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -190,7 +190,7 @@ def _test_interpolate_bilinear_2d(test_case, device):
 
 
 def _test_interpolate_bicubic_2d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 5).reshape((1, 1, 2, 2)).astype(np.float32),
         device=flow.device(device),
         dtype=flow.float32,
@@ -217,7 +217,7 @@ def _test_interpolate_bicubic_2d(test_case, device):
 
 
 def _test_interpolate_bicubic_same_dim_2d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 5).reshape((1, 1, 2, 2)).astype(np.float32),
         device=flow.device(device),
         dtype=flow.float32,
@@ -233,7 +233,7 @@ def _test_interpolate_bicubic_same_dim_2d(test_case, device):
 
 
 def _test_interpolate_trilinear_3d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 9).reshape((1, 1, 2, 2, 2)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -280,7 +280,7 @@ def _test_interpolate_trilinear_3d(test_case, device):
 
 
 def _test_interpolate_trilinear_3d_align_corners(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.arange(1, 9).reshape((1, 1, 2, 2, 2)),
         device=flow.device(device),
         dtype=flow.float32,
@@ -366,7 +366,7 @@ def _test_interpolate_trilinear_3d_align_corners(test_case, device):
 
 
 def _test_interpolate_area_1d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.array(
             [
                 [
@@ -410,7 +410,7 @@ def _test_interpolate_area_1d(test_case, device):
 
 
 def _test_interpolate_area_2d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.array(
             [
                 [
@@ -479,7 +479,7 @@ def _test_interpolate_area_2d(test_case, device):
 
 
 def _test_interpolate_area_3d(test_case, device):
-    input = flow.Tensor(
+    input = flow.tensor(
         np.array(
             [
                 [
@@ -653,6 +653,27 @@ def _test_interpolate_area_3d(test_case, device):
     test_case.assertTrue(np.allclose(input.grad.numpy(), np_grad, 1e-05, 1e-05))
 
 
+def _test_interpolate_output_size_arg_with_scalar(test_case, device):
+    mode = "bicubic"
+    x = flow.Tensor(8, 32, 64).to(device)
+
+    window = 16
+    t = x.shape[2]
+    x = x[:, None]
+
+    np_center = np.random.randint(window, t - window, (1,))[0]
+    np_warped = np.random.randint(np_center - window, np_center + window, (1,))[0] + 1
+
+    center = flow.tensor(np_center)
+    warped = flow.tensor(np_warped)
+
+    res = flow.nn.functional.interpolate(
+        x[:, :, :center], (warped, x.shape[3]), mode=mode, align_corners=False
+    )
+    test_case.assertTrue(np.array_equal(res.size()[0], 8))
+    test_case.assertTrue(np.array_equal(res.size()[1], 1))
+
+
 @flow.unittest.skip_unless_1n1d()
 class TestInterpolate(flow.unittest.TestCase):
     def test_interpolate(test_case):
@@ -670,6 +691,7 @@ class TestInterpolate(flow.unittest.TestCase):
             _test_interpolate_area_1d,
             _test_interpolate_area_2d,
             _test_interpolate_area_3d,
+            _test_interpolate_output_size_arg_with_scalar,
         ]
         arg_dict["device"] = ["cpu", "cuda"]
         for arg in GenArgList(arg_dict):

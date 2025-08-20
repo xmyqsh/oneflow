@@ -18,16 +18,19 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
+from oneflow.test_utils.automated_test_util import *
 
 import oneflow as flow
 import oneflow.nn as nn
 import oneflow.unittest
+import torch as torch_original
+from packaging import version
 
 
 def _test_conv1d_bias_false(test_case, device):
     np_arr = np.array([[[1.28795946, -0.2921792, 0.20338029, 0.78604293, -1.89607573]]])
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -68,7 +71,7 @@ def _test_conv1d_bias_true(test_case, device):
             ]
         ]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -125,7 +128,7 @@ def _test_conv1d_dilation(test_case, device):
     np_arr = np.array(
         [[[-0.43016902, 1.74619496, -0.57338119, 0.25563857, 0.12575546]]]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -161,7 +164,7 @@ def _test_conv1d_stride(test_case, device):
     np_arr = np.array(
         [[[-1.01312506, -0.40687919, 1.5985316, 0.53594196, -1.89935565]]]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -202,7 +205,7 @@ def _test_conv1d_group_bias_true(test_case, device):
             ]
         ]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -252,7 +255,7 @@ def _test_conv1d_group_large_out_bias_true(test_case, device):
             ]
         ]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -310,7 +313,7 @@ def _test_conv1d_group_large_in_bias_true(test_case, device):
             ]
         ]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -361,7 +364,7 @@ def _test_conv1d_compilcate(test_case, device):
             ]
         ]
     )
-    input = flow.Tensor(
+    input = flow.tensor(
         np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     weight = np.array(
@@ -433,6 +436,104 @@ class TestConv1d(flow.unittest.TestCase):
         arg_dict["device"] = ["cuda", "cpu"]
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
+
+    @unittest.skip("skip for now, becase it failed 8 times in past week")
+    @autotest(n=3)
+    def test_nn_functional_conv1d(test_case):
+        device = random_device()
+        img = torch.ones((1, 3, 224), requires_grad=True).to(device)
+        kernel = torch.ones((3, 1, 3), requires_grad=True).to(device)
+        y = torch.nn.functional.conv1d(img, kernel, groups=3)
+        return y
+
+    @unittest.skipIf(
+        version.parse(torch_original.__version__) <= version.parse("1.13.0"),
+        "conv module don't support unbatched input in PyTorch before '1.13.0'",
+    )
+    @autotest(n=3)
+    def test_nn_functional_conv1d_2dinput(test_case):
+        device = random_device()
+        img = torch.ones((3, 224), requires_grad=True).to(device)
+        kernel = torch.ones((3, 1, 3), requires_grad=True).to(device)
+        y = torch.nn.functional.conv1d(img, kernel, groups=3)
+        return y
+
+    @profile(torch.nn.functional.conv1d)
+    def profile_conv1d(test_case):
+        inputs = torch.ones(40, 16, 30)
+        weight_16c = torch.ones(20, 16, 5)
+        weight_16c_4g = torch.ones(20, 4, 5)
+        weight_3k_16c = torch.ones(20, 16, 3)
+        weight_1k_16c = torch.ones(20, 16, 1)
+        torch.nn.functional.conv1d(inputs, weight_16c)
+        torch.nn.functional.conv1d(inputs, weight_16c, bias=torch.ones(20))
+        torch.nn.functional.conv1d(inputs, weight_16c, bias=torch.ones(20), padding=2)
+        torch.nn.functional.conv1d(
+            inputs, weight_16c, bias=torch.ones(20), padding=2, stride=2
+        )
+        torch.nn.functional.conv1d(inputs, weight_16c_4g, groups=4)
+        torch.nn.functional.conv1d(inputs, weight_16c_4g, bias=torch.ones(20), groups=4)
+        torch.nn.functional.conv1d(
+            inputs, weight_16c_4g, bias=torch.ones(20), groups=4, stride=4
+        )
+        torch.nn.functional.conv1d(
+            inputs, weight_16c_4g, bias=torch.ones(20), groups=4, padding=2
+        )
+        torch.nn.functional.conv1d(inputs, weight_3k_16c)
+        torch.nn.functional.conv1d(inputs, weight_3k_16c, bias=torch.ones(20))
+        torch.nn.functional.conv1d(
+            inputs, weight_3k_16c, bias=torch.ones(20), padding=1
+        )
+        torch.nn.functional.conv1d(
+            inputs, weight_3k_16c, bias=torch.ones(20), padding=1, stride=2
+        )
+        torch.nn.functional.conv1d(inputs, weight_1k_16c)
+        torch.nn.functional.conv1d(inputs, weight_1k_16c, bias=torch.ones(20))
+        torch.nn.functional.conv1d(inputs, weight_1k_16c, bias=torch.ones(20), stride=2)
+
+    @autotest(n=5, atol=1e-3)
+    def test_conv1d_with_random_data(test_case):
+        channels = random(1, 6)
+        m = torch.nn.Conv1d(
+            in_channels=channels,
+            out_channels=random(1, 20),
+            kernel_size=random(1, 4),
+            stride=random() | nothing(),
+            padding=random(1, 3).to(int) | nothing(),
+            dilation=random(1, 5) | nothing(),
+            groups=random(1, 5) | nothing(),
+            padding_mode=constant("zeros") | nothing(),
+        )
+        m.train(random())
+        device = random_device()
+        m.to(device)
+        x = random_tensor(ndim=3, dim1=channels).to(device)
+        y = m(x)
+        return y
+
+    @unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
+    @autotest(n=5, check_allclose=False)
+    def test_conv1d_group_with_random_data(test_case):
+        channels = 720  # lcm(1, 2, 3, 4, 5, 6)
+        m = torch.nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=random(1, 4),
+            stride=random() | nothing(),
+            padding=random(1, 3).to(int) | nothing(),
+            dilation=random(1, 5) | nothing(),
+            groups=random(1, 7),
+            padding_mode=constant("zeros") | nothing(),
+        )
+        m.train(random())
+
+        device = random_device()
+        m.to(device)
+        m.pytorch.to("cuda")
+        x = random_tensor(ndim=3, dim1=channels).to(device)
+        x.pytorch = x.pytorch.to("cuda")
+        y = m(x)
+        return y
 
 
 if __name__ == "__main__":

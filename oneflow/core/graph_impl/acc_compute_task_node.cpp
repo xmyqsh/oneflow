@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/graph/compute_task_node.h"
-#include "oneflow/core/framework/framework.h"
+#include "oneflow/core/graph/task_stream_index_manager.h"
 
 namespace oneflow {
 
@@ -27,6 +27,7 @@ class AccCompTaskNode final : public CompTaskNode {
   void BuildExecGphAndRegst() override;
   void ProduceAllRegstsAndBindEdges() override;
   void ConsumeAllRegsts() override;
+  void ConsumeFakeRegsts() override;
 };
 
 void AccCompTaskNode::ProduceAllRegstsAndBindEdges() {
@@ -35,6 +36,7 @@ void AccCompTaskNode::ProduceAllRegstsAndBindEdges() {
 }
 
 void AccCompTaskNode::ConsumeAllRegsts() { ConsumeRegst("in", SoleInDataEdge()->GetSoleRegst()); }
+void AccCompTaskNode::ConsumeFakeRegsts() { ConsumeFakeRegst("in"); }
 
 void AccCompTaskNode::BuildExecGphAndRegst() {
   std::shared_ptr<RegstDesc> in_regst = GetSoleConsumedRegst("in");
@@ -44,12 +46,14 @@ void AccCompTaskNode::BuildExecGphAndRegst() {
   exec_node->BindBnWithRegst(op()->SoleIbn(), in_regst);
   out_regst->AddLbi(op()->BnInOp2Lbi(op()->SoleObn()));
   exec_node->BindBnWithRegst(op()->SoleObn(), out_regst);
-  exec_node->InferBlobDescs(parallel_ctx());
+  (exec_node->*GetInferBlobDescsMethod())(parallel_ctx());
   out_regst->ForEachLbi([out_regst](const LogicalBlobId& lbi) {
     const BlobDesc* blob_desc = out_regst->GetBlobDesc(lbi);
     CHECK_EQ(blob_desc->is_dynamic(), false);
   });
 }
+
+REGISTER_COMP_TASK_STREAM_INDEX_GETTER(TaskType::kAcc);
 
 REGISTER_USER_OP_COMP_TASK_NODE_TYPE("acc", AccCompTaskNode);
 

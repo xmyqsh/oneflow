@@ -13,9 +13,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#include "oneflow/core/common/shape_vec.h"
+#include "oneflow/core/common/tensor_meta.h"
 #include "oneflow/core/framework/framework.h"
-#include "oneflow/core/kernel/kernel_util.h"
 #include "oneflow/core/kernel/cuda_graph_support.h"
+#include "oneflow/core/ep/include/primitive/cast.h"
+#include "oneflow/core/ep/include/primitive/broadcast_elementwise_unary.h"
+#include "oneflow/user/kernels/op_kernel_wrapper.h"
 
 namespace oneflow {
 
@@ -23,52 +27,16 @@ namespace user_op {
 
 namespace {
 
-template<DeviceType device_type, typename T, typename U>
-struct CopyTensor;
+template<typename Context>
+std::unique_ptr<ep::primitive::BroadcastElementwiseUnary> NewBroadcastPrimitive(Context* ctx) {
+  const DataType in_data_type = ctx->TensorDesc4ArgNameAndIndex("in", 0)->data_type();
+  const DataType out_data_type = ctx->TensorDesc4ArgNameAndIndex("out", 0)->data_type();
+  const size_t max_ndim = std::max(ctx->TensorDesc4ArgNameAndIndex("in", 0)->shape().NumAxes(),
+                                   ctx->TensorDesc4ArgNameAndIndex("out", 0)->shape().NumAxes());
+  return ep::primitive::NewPrimitive<ep::primitive::BroadcastElementwiseUnaryFactory>(
+      ctx->device_type(), ep::primitive::UnaryOp::kCast, in_data_type, out_data_type, max_ndim);
+}
 
-template<typename T, typename U>
-struct CopyTensor<DeviceType::kCPU, T, U> {
-  static void Call(DeviceCtx* ctx, const Tensor* src, Tensor* dst) {
-    CopyElem(src->dptr<T>(), dst->mut_dptr<U>(), src->shape().elem_cnt());
-  }
-};
-
-template<typename T, typename U>
-struct CopyTensor<DeviceType::kGPU, T, U> {
-  static void Call(DeviceCtx* ctx, const Tensor* src, Tensor* dst) {
-#ifdef WITH_CUDA
-    CopyElemOnGpu(ctx, src->dptr<T>(), dst->mut_dptr<U>(), src->shape().elem_cnt());
-#else
-    UNIMPLEMENTED();
-#endif
-  }
-};
-
-}  // namespace
-
-#define MAKE_CASE_HANDLER_ENTRY(in_type_pair, out_type_pair)                          \
-  {std::make_pair(OF_PP_PAIR_SECOND(in_type_pair), OF_PP_PAIR_SECOND(out_type_pair)), \
-   CopyTensor<device_type, OF_PP_PAIR_FIRST(in_type_pair),                            \
-              OF_PP_PAIR_FIRST(out_type_pair)>::Call},
-
-template<DeviceType device_type>
-struct CastUtil final {
-  static void SwitchCopyTensor(const std::pair<DataType, DataType>& key, DeviceCtx* ctx,
-                               const Tensor* src, Tensor* dst) {
-    static const std::map<std::pair<DataType, DataType>,
-                          std::function<void(DeviceCtx*, const Tensor*, Tensor*)>>
-        case_handler{
-            // clang-format off
-          OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(MAKE_CASE_HANDLER_ENTRY, POD_DATA_TYPE_SEQ, POD_DATA_TYPE_SEQ)
-          MAKE_CASE_HANDLER_ENTRY((float, DataType::kFloat), (float16, DataType::kFloat16))
-          MAKE_CASE_HANDLER_ENTRY((float16, DataType::kFloat16), (float, DataType::kFloat))
-            // clang-format on
-        };
-    case_handler.at(key)(ctx, src, dst);
-  }
-};
-
-template<DeviceType device_type>
 class CastKernel final : public OpKernel, public user_op::CudaGraphSupport {
  public:
   CastKernel() = default;
@@ -76,26 +44,68 @@ class CastKernel final : public OpKernel, public user_op::CudaGraphSupport {
 
  private:
   void Compute(KernelComputeContext* ctx) const override {
-    const Tensor* input_tensor = ctx->Tensor4ArgNameAndIndex("in", 0);
-    Tensor* output_tenor = ctx->Tensor4ArgNameAndIndex("out", 0);
-    CastUtil<device_type>::SwitchCopyTensor(
-        std::make_pair(input_tensor->data_type(), output_tenor->data_type()), ctx->device_ctx(),
-        input_tensor, output_tenor);
+    const Tensor* input = ctx->Tensor4ArgNameAndIndex("in", 0);
+    Tensor* output = ctx->Tensor4ArgNameAndIndex("out", 0);
+    const int64_t elem_cnt = input->shape_view().elem_cnt();
+    // 0-size tensor
+    CHECK_EQ(output->shape_view().elem_cnt(), elem_cnt)
+        << "The number of cast op's input and output elements should be equal.";
+    if (elem_cnt == 0) { return; }
+    if (input->data_type() == output->data_type() && input->dptr() == output->dptr()) { return; }
+    const size_t ndim = input->shape_view().NumAxes();
+    auto broadcast_primitive = NewBroadcastPrimitive(ctx);
+    CHECK(broadcast_primitive);
+    if (ndim == 0 && elem_cnt == 1) {
+      // 0-dim tensor
+      // TODO: remove these when BroadcastElementwiseUnary primitive support 0-dim(scalar) tensor
+      Shape input_shape(DimVector{1});
+      Shape output_shape(DimVector{1});
+      Stride input_stride(DimVector{1});
+      Stride output_stride(DimVector{1});
+      const size_t scalar_ndim = 1;
+      broadcast_primitive->Launch(ctx->stream(), scalar_ndim, input_shape.data(),
+                                  input_stride.data(), input->dptr(), scalar_ndim,
+                                  output_shape.data(), output_stride.data(), output->mut_dptr());
+    } else {
+      broadcast_primitive->Launch(
+          ctx->stream(), ndim, input->shape_view().data(), input->stride().data(), input->dptr(),
+          ndim, output->shape_view().data(), output->stride().data(), output->mut_dptr());
+    }
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_CAST_KERNEL(device)                                              \
-  REGISTER_USER_KERNEL("cast").SetCreateFn<CastKernel<device>>().SetIsMatchedHob( \
-      user_op::HobDeviceTag() == device);                                         \
-  REGISTER_USER_KERNEL("cast_like")                                               \
-      .SetCreateFn<CastKernel<device>>()                                          \
-      .SetIsMatchedHob(user_op::HobDeviceTag() == device);
+auto BroadcastPrimitiveExists() {
+  return hob::make_custom("BroadcastElementwiseUnaryPrimitiveExists",
+                          [](const user_op::KernelRegContext& ctx) -> bool {
+                            return NewBroadcastPrimitive(&ctx).operator bool();
+                          });
+}
 
-REGISTER_CAST_KERNEL(DeviceType::kCPU)
-#ifdef WITH_CUDA
-REGISTER_CAST_KERNEL(DeviceType::kGPU)
-#endif  // WITH_CUDA
+REGISTER_USER_KERNEL("cast")
+    .SetCreateFn<CastKernel>()
+    .SetIsMatchedHob(BroadcastPrimitiveExists() == true)
+    .SetInplaceProposalFn([](const user_op::InferContext& ctx,
+                             const user_op::AddInplaceArgPair& AddInplaceArgPairFn) -> Maybe<void> {
+      if (ctx.InputDType("in", 0) == ctx.Attr<DataType>("dtype")) {
+        OF_RETURN_IF_ERROR(AddInplaceArgPairFn("out", 0, "in", 0, false));
+      }
+      return Maybe<void>::Ok();
+    });
+
+REGISTER_USER_KERNEL("cast_like")
+    .SetCreateFn<CastKernel>()
+    .SetIsMatchedHob(BroadcastPrimitiveExists() == true)
+    .SetInplaceProposalFn([](const user_op::InferContext& ctx,
+                             const user_op::AddInplaceArgPair& AddInplaceArgPairFn) -> Maybe<void> {
+      if (ctx.InputDType("in", 0) == ctx.InputDType("like", 0)) {
+        OF_RETURN_IF_ERROR(AddInplaceArgPairFn("out", 0, "in", 0, false));
+      }
+      return Maybe<void>::Ok();
+    });
+
+}  // namespace
 
 }  // namespace user_op
+
 }  // namespace oneflow

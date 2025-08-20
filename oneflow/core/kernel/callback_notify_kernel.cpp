@@ -30,24 +30,19 @@ class CallbackNotifyKernel final : public Kernel {
 
  private:
   bool IsStateless() const override { return false; }
-  void ForwardDataContent(const KernelContext* ctx) const override;
+  void ForwardDataContent(KernelContext* ctx) const override;
 };
 
 template<typename T>
-void CallbackNotifyKernel<T>::ForwardDataContent(const KernelContext* ctx) const {
-  auto* buffer_mgr = Global<BufferMgr<std::shared_ptr<JobInstance>>>::Get();
+void CallbackNotifyKernel<T>::ForwardDataContent(KernelContext* ctx) const {
+  auto* buffer_mgr = Singleton<BufferMgr<std::shared_ptr<JobInstance>>>::Get();
   std::string buffer_name;
-  if (CHECK_JUST(*Global<Maybe<bool>, MultiClient>::Get())) {
-    CHECK(this->op_conf().callback_notify_conf().has_job_name());
-    buffer_name = GetCallbackNotifierBufferName(this->op_conf().callback_notify_conf().job_name());
-  } else {
-    T job_id = *ctx->BnInOp2Blob("in")->dptr<T>();
-    buffer_name = this->op_conf().callback_notify_conf().callback_buffer_name(job_id);
-  }
-  std::shared_ptr<JobInstance> foreign_job_instance;
-  BufferStatus buffer_status = buffer_mgr->Get(buffer_name)->TryReceive(&foreign_job_instance);
+  CHECK(this->op_conf().callback_notify_conf().has_job_name());
+  buffer_name = GetCallbackNotifierBufferName(this->op_conf().callback_notify_conf().job_name());
+  std::shared_ptr<JobInstance> job_instance;
+  BufferStatus buffer_status = buffer_mgr->Get(buffer_name)->TryReceive(&job_instance);
   CHECK_NE(buffer_status, kBufferStatusEmpty);
-  if (buffer_status == kBufferStatusSuccess) { foreign_job_instance->Finish(); }
+  if (buffer_status == kBufferStatusSuccess) { job_instance->Finish(); }
 }
 
 ADD_CPU_DEFAULT_KERNEL_CREATOR(OperatorConf::kCallbackNotifyConf, CallbackNotifyKernel,

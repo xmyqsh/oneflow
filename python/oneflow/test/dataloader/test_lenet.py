@@ -20,6 +20,7 @@ import unittest
 import oneflow as flow
 import oneflow.nn as nn
 import oneflow.unittest
+
 from data_utils import load_data_fashion_mnist
 
 
@@ -65,12 +66,14 @@ def evaluate_accuracy(data_iter, net, device=None):
     return acc_sum / n
 
 
-def test_train_and_eval(test_case):
+def _test_train_and_eval(test_case):
     if os.getenv("ONEFLOW_TEST_CPU_ONLY"):
         device = flow.device("cpu")
     else:
         device = flow.device("cuda")
     net = LeNet()
+    lr, num_epochs = 0.02, 1
+    optimizer = flow.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
     net.to(device)
 
     batch_size = 256
@@ -90,8 +93,6 @@ def test_train_and_eval(test_case):
     loss = nn.CrossEntropyLoss()
     loss.to(device)
 
-    lr, num_epochs = 0.02, 1
-    optimizer = flow.optim.SGD(net.parameters(), lr=lr, momentum=0.9)
     final_accuracy = 0
 
     for epoch in range(num_epochs):
@@ -132,7 +133,7 @@ def test_train_and_eval(test_case):
 @flow.unittest.skip_unless_1n1d()
 class TestLenet(flow.unittest.TestCase):
     def test_lenet(test_case):
-        test_train_and_eval(test_case)
+        _test_train_and_eval(test_case)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#ifndef ONEFLOW_CORE_JOB_REWRITER_PASS_UTIL_H_
+#define ONEFLOW_CORE_JOB_REWRITER_PASS_UTIL_H_
+
 #include <string>
 #include <map>
 
@@ -67,9 +70,16 @@ class OpConfCache {
   void Put(const OperatorConf& op_conf) { _op_confs_to_update[op_conf.name()] = op_conf; }
   std::vector<OperatorConf> op_confs() {
     std::vector<OperatorConf> ret;
-    for (const auto& x : _op_confs_to_update) { ret.push_back(x.second); }
+    for (const auto& x : _op_confs_to_update) { ret.emplace_back(x.second); }
     return ret;
   }
 };
 
+std::function<bool(const OpNode* op_node)> MakePredicatorIsSafeToDelete(const OpGraph& op_graph);
+bool IsUserOpWithTypeName(const OperatorConf& op_conf, const std::string& op_type_name);
+
+std::string GenParallelConfKey(const ParallelConf& conf);
+
 }  // namespace oneflow
+
+#endif  // ONEFLOW_CORE_JOB_REWRITER_PASS_UTIL_H_

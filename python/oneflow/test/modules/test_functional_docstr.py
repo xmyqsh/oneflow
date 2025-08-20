@@ -13,15 +13,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import os
 import inspect
+import os
 import unittest
 from collections import OrderedDict
 
-from test_util import GenArgList
-
 import oneflow as flow
 import oneflow.unittest
+
+from oneflow.test_utils.test_util import GenArgList
 
 
 def _run_functional_doctest(
@@ -30,7 +30,7 @@ def _run_functional_doctest(
     verbose=None,
     optionflags=0,
     raise_on_error=True,
-    module=flow._C,
+    module=flow,
 ):
     import doctest
 
@@ -39,12 +39,26 @@ def _run_functional_doctest(
         runner = doctest.DebugRunner(verbose=verbose, optionflags=optionflags)
     else:
         runner = doctest.DocTestRunner(verbose=verbose, optionflags=optionflags)
-    r = inspect.getmembers(flow._C)
+    r = inspect.getmembers(module)
     for (name, fun) in r:
         if fun.__doc__ is not None:
-            print("test on docstr of: ", ".".join([module.__name__, name]))
             test = parser.get_doctest(fun.__doc__, {}, __name__, __file__, 0)
-            runner.run(test)
+            try:
+                runner.run(test)
+            except doctest.DocTestFailure as e:
+                print(f"\nGot error result in the docstring of {name}")
+                print(f"got output: {e.got}")
+                raise e
+            except doctest.UnexpectedException as e:
+                print(f"\nGot UnexpectedException in the docstring of {name}")
+                raise e.exc_info[1]
+
+    if not raise_on_error:
+        test_case.assertEqual(
+            runner.failures,
+            0,
+            f"{runner.summarize()}, please turn on raise_on_error to see more details",
+        )
 
 
 @flow.unittest.skip_unless_1n1d()
@@ -52,7 +66,7 @@ def _run_functional_doctest(
 class TestFunctionalDocstrModule(flow.unittest.TestCase):
     def test_functional_docstr(test_case):
         arg_dict = OrderedDict()
-        arg_dict["module"] = [flow._C]
+        arg_dict["module"] = [flow, flow.Tensor, flow.sbp, flow.env, flow.nn.functional]
         for arg in GenArgList(arg_dict):
             _run_functional_doctest(
                 test_case, raise_on_error=True, verbose=True, module=arg[0]
@@ -60,4 +74,5 @@ class TestFunctionalDocstrModule(flow.unittest.TestCase):
 
 
 if __name__ == "__main__":
+    flow.set_printoptions(linewidth=80)
     unittest.main()

@@ -17,9 +17,9 @@ limitations under the License.
 #define ONEFLOW_CORE_GRAPH_COPY_TASK_NODE_H_
 
 #include "oneflow/core/graph/transport_task_node.h"
+#include "oneflow/core/graph/boxing_task_graph.pb.h"
 
 namespace oneflow {
-
 class CopyTaskNode : public TransportTaskNode {
  public:
   OF_DISALLOW_COPY_AND_MOVE(CopyTaskNode);
@@ -45,13 +45,15 @@ class CopyHdTaskNode final : public CopyTaskNode {
 
   TaskType GetTaskType() const override { return TaskType::kCopyHd; }
 
-  void Init(CopyHdOpConf::Type, int64_t machine_id, int64_t dev_phy_id, const LogicalBlobId& lbi);
+  void Init(CopyHdType, const DeviceId& device_id, const LogicalBlobId& lbi);
 
-  CopyHdOpConf::Type copy_type() const { return copy_type_; }
+  void ProduceAllRegstsAndBindEdges() override;
+
+  CopyHdType copy_type() const { return copy_type_; }
   MemZoneId MemZoneId121() const override {
-    if (copy_type_ == CopyHdOpConf::H2D) {
+    if (copy_type_ == CopyHdType::H2D) {
       return TaskNode::MemZoneId121();
-    } else if (copy_type_ == CopyHdOpConf::D2H) {
+    } else if (copy_type_ == CopyHdType::D2H) {
       return GetNodeCPUMemZoneId(this->machine_id());
     } else {
       UNIMPLEMENTED();
@@ -59,11 +61,15 @@ class CopyHdTaskNode final : public CopyTaskNode {
     return kInvalidMemZoneId;
   }
 
+  Maybe<void> InitTransportTaskFromProto(const TransportTaskProto& transport_task_proto,
+                                         const TaskGraphRebuildCtx& ctx) override;
+  void ToTransportTaskProto(TransportTaskProto*) const override;
+
  private:
   void InitProducedRegstMemCase(MemoryCase*) override;
   OperatorConf NewCopyOpConf() override;
 
-  CopyHdOpConf::Type copy_type_;
+  CopyHdType copy_type_;
 };
 
 class CopyCommNetTaskNode final : public CopyTaskNode {
@@ -75,6 +81,10 @@ class CopyCommNetTaskNode final : public CopyTaskNode {
   TaskType GetTaskType() const override { return TaskType::kCopyCommNet; }
 
   void Init(int64_t machine_id, const LogicalBlobId& lbi);
+
+  Maybe<void> InitTransportTaskFromProto(const TransportTaskProto& transport_task_proto,
+                                         const TaskGraphRebuildCtx& ctx) override;
+  void ToTransportTaskProto(TransportTaskProto*) const override;
 
  private:
   OperatorConf NewCopyOpConf() override;

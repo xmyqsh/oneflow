@@ -47,6 +47,11 @@ class Slice {
   int64_t start() const { return start_; }
   int64_t end() const { return end_; }
   int64_t step() const { return step_; }
+  std::string ToString() const {
+    std::stringstream ss;
+    ss << "[" << start_ << ":" << end_ << ":" << step_ << "]\n";
+    return ss.str();
+  }
 
  private:
   int64_t start_;
@@ -104,14 +109,28 @@ class TensorIndex : public std::vector<detail::IndexItem> {
   using std::vector<detail::IndexItem>::vector;
 };
 
-int64_t CountSpecifiedDims(const TensorIndex& index);
+bool IsMaskTensor(const std::shared_ptr<Tensor>& tensor);
 
 Maybe<void> PrepareSliceIndices(const TensorIndex& index, const Shape& shape,
                                 std::vector<detail::Slice>* slice_indices,
-                                TensorTuple* tensor_indices, std::vector<int64_t>* target_dims);
+                                TensorTuple* tensor_indices, std::vector<int64_t>* expand_dims,
+                                std::vector<int64_t>* target_dims);
+
+Maybe<std::vector<detail::Slice>> RemoveExpandDimSlice(
+    const std::vector<detail::Slice>& expand_slices, const std::vector<int64_t>& expand_dims);
 
 Maybe<Tensor> ApplyAdvancedIndexing(const std::shared_ptr<Tensor>& input,
                                     const TensorTuple& indices);
+
+Maybe<Tensor> ApplySelectIndexing(const std::shared_ptr<one::Tensor>& input,
+                                  const TensorIndex& index);
+
+Maybe<void> UnifyInputAndIndicesOnDevice(const std::shared_ptr<Tensor>& x,
+                                         TensorTuple& tensor_indices);
+
+Maybe<Tensor> ApplyAdvancedIndexingUpdate(const std::shared_ptr<Tensor>& input,
+                                          const TensorTuple& indices,
+                                          const std::shared_ptr<Tensor>& value);
 
 }  // namespace functional
 }  // namespace one

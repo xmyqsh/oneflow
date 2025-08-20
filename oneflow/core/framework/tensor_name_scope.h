@@ -27,9 +27,13 @@ class TensorNameScope {
  public:
   static TensorNameScope* Global();
 
+  const std::string& Lookup(const Tensor* tensor) const;
   const std::string& Lookup(const std::shared_ptr<Tensor>& tensor) const;
 
+  void Record(const Tensor* tensor, const std::string& name);
   void Record(const std::shared_ptr<Tensor>& tensor, const std::string& name);
+
+  void Clear();
 
  private:
   TensorNameScope() : default_tensor_name_("") {}
@@ -40,7 +44,8 @@ class TensorNameScope {
 
   std::string default_tensor_name_;
   // uint64_t(Tensor*) -> the name of the tensor.
-  std::unordered_map<uint64_t, std::string> tensor_names_;
+  std::unordered_map<uint64_t, std::string> lazy_tensor_names_;
+  std::unordered_map<uint64_t, std::string> eager_tensor_names_;
 };
 
 }  // namespace one

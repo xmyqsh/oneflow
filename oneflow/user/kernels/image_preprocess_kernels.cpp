@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#include "oneflow/core/common/memory_format.pb.h"
 #include "oneflow/core/framework/framework.h"
 #include "oneflow/core/common/balanced_splitter.h"
 #include "oneflow/core/common/blocking_counter.h"
@@ -27,23 +28,18 @@ namespace oneflow {
 
 namespace {
 
-enum TensorLayout {
-  kNCHW = 0,
-  kNHWC = 1,
-};
-
-template<TensorLayout layout>
+template<MemoryFormat layout>
 inline int64_t GetOffset(int64_t h, int64_t w, int64_t c, int64_t H, int64_t W, int64_t C);
 
 template<>
-inline int64_t GetOffset<TensorLayout::kNCHW>(int64_t h, int64_t w, int64_t c, int64_t H, int64_t W,
-                                              int64_t C) {
+inline int64_t GetOffset<MemoryFormat::kContiguous>(int64_t h, int64_t w, int64_t c, int64_t H,
+                                                    int64_t W, int64_t C) {
   return c * H * W + h * W + w;  // C, H, W
 }
 
 template<>
-inline int64_t GetOffset<TensorLayout::kNHWC>(int64_t h, int64_t w, int64_t c, int64_t H, int64_t W,
-                                              int64_t C) {
+inline int64_t GetOffset<MemoryFormat::kChannelsLast>(int64_t h, int64_t w, int64_t c, int64_t H,
+                                                      int64_t W, int64_t C) {
   return h * W * C + w * C + c;  // H, W, C
 }
 
@@ -60,7 +56,7 @@ inline int64_t GetInputW<false>(int64_t out_w, int64_t out_W, int64_t in_W, floa
   return (in_W - out_W) * crop_pos_x + out_w;
 }
 
-template<TensorLayout output_layout, bool mirror>
+template<MemoryFormat output_layout, bool mirror>
 void CMN1Sample(int64_t C, int64_t in_H, int64_t in_W, int64_t out_H, int64_t out_W,
                 float crop_pos_y, float crop_pos_x, const uint8_t* in_dptr, float* out_dptr,
                 const std::vector<float>& mean_vec, const std::vector<float>& inv_std_vec) {
@@ -73,7 +69,7 @@ void CMN1Sample(int64_t C, int64_t in_H, int64_t in_W, int64_t out_H, int64_t ou
       int64_t in_h = (in_H - out_H) * crop_pos_y + out_h;
       for (int64_t out_w = 0; out_w < out_W; ++out_w) {
         int64_t in_w = GetInputW<mirror>(out_w, out_W, in_W, crop_pos_x);
-        int64_t in_offset = GetOffset<TensorLayout::kNHWC>(in_h, in_w, c, in_H, in_W, C);
+        int64_t in_offset = GetOffset<MemoryFormat::kChannelsLast>(in_h, in_w, c, in_H, in_W, C);
         int64_t out_offset = GetOffset<output_layout>(out_h, out_w, c, out_H, out_W, C);
         out_dptr[out_offset] = (static_cast<float>(in_dptr[in_offset]) - mean) * inv_std;
       }
@@ -85,9 +81,9 @@ std::vector<int8_t> GetMirrorVec(user_op::KernelComputeContext* ctx) {
   std::vector<int8_t> mirror;
   user_op::Tensor* in_blob = ctx->Tensor4ArgNameAndIndex("in", 0);
   user_op::Tensor* mirror_blob = ctx->Tensor4ArgNameAndIndex("mirror", 0);
-  int64_t record_num = in_blob->shape().At(0);
+  int64_t record_num = in_blob->shape_view().At(0);
   if (mirror_blob) {
-    CHECK_EQ(record_num, mirror_blob->shape().elem_cnt());
+    CHECK_EQ(record_num, mirror_blob->shape_view().elem_cnt());
     mirror.insert(mirror.end(), mirror_blob->dptr<int8_t>(),
                   mirror_blob->dptr<int8_t>() + record_num);
   } else {
@@ -105,7 +101,7 @@ class CMNAttr final : public user_op::OpKernelState {
     int64_t C = ImageUtil::IsColor(color_space) ? 3 : 1;
     CHECK(mean_vec_.size() == 1 || mean_vec_.size() == C);
     CHECK(std_vec.size() == 1 || std_vec.size() == C);
-    for (float elem : std_vec) { inv_std_vec_.push_back(1.0f / elem); }
+    for (float elem : std_vec) { inv_std_vec_.emplace_back(1.0f / elem); }
     if (mean_vec_.size() == 1) { mean_vec_.resize(C, mean_vec_.at(0)); }
     if (inv_std_vec_.size() == 1) { inv_std_vec_.resize(C, inv_std_vec_.at(0)); }
   }
@@ -132,14 +128,15 @@ class CropMirrorNormalizeFromStaticShapeToFloatKernel final : public user_op::Op
   }
 
  private:
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     auto* cmn_attr = dynamic_cast<CMNAttr*>(state);
     const std::vector<float>& mean_vec = cmn_attr->mean_vec();
     const std::vector<float>& inv_std_vec = cmn_attr->inv_std_vec();
     user_op::Tensor* in_blob = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out_blob = ctx->Tensor4ArgNameAndIndex("out", 0);
     std::vector<int8_t> mirror = GetMirrorVec(ctx);
-    int64_t record_num = in_blob->shape().At(0);
+    int64_t record_num = in_blob->shape_view().At(0);
     const std::string& color_space = ctx->Attr<std::string>("color_space");
     int64_t C = ImageUtil::IsColor(color_space) ? 3 : 1;
     float crop_pos_y = ctx->Attr<float>("crop_pos_y");
@@ -148,13 +145,13 @@ class CropMirrorNormalizeFromStaticShapeToFloatKernel final : public user_op::Op
     float* out_dptr = out_blob->mut_dptr<float>();
 
     const uint8_t* in_dptr = in_blob->dptr<uint8_t>();
-    const ShapeView& in_shape = in_blob->shape();
+    const ShapeView& in_shape = in_blob->shape_view();
     int64_t N = in_shape.At(0);
     int64_t in_H = in_shape.At(1);
     int64_t in_W = in_shape.At(2);
     CHECK_EQ(C, in_shape.At(3));
     int64_t in_image_elem_cnt = in_H * in_W * C;
-    const ShapeView& out_shape = out_blob->shape();
+    const ShapeView& out_shape = out_blob->shape_view();
     CHECK_EQ(out_shape.NumAxes(), 4);
     CHECK_EQ(out_shape.At(0), N);
     if (output_layout == "NCHW") {
@@ -164,11 +161,11 @@ class CropMirrorNormalizeFromStaticShapeToFloatKernel final : public user_op::Op
       int64_t out_image_elem_cnt = C * out_H * out_W;
       MultiThreadLoop(record_num, [&](size_t i) {
         if (mirror.at(i)) {
-          CMN1Sample<TensorLayout::kNCHW, true>(
+          CMN1Sample<MemoryFormat::kContiguous, true>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_dptr + in_image_elem_cnt * i,
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         } else {
-          CMN1Sample<TensorLayout::kNCHW, false>(
+          CMN1Sample<MemoryFormat::kContiguous, false>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_dptr + in_image_elem_cnt * i,
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         }
@@ -180,11 +177,11 @@ class CropMirrorNormalizeFromStaticShapeToFloatKernel final : public user_op::Op
       int64_t out_image_elem_cnt = C * out_H * out_W;
       MultiThreadLoop(record_num, [&](size_t i) {
         if (mirror.at(i)) {
-          CMN1Sample<TensorLayout::kNHWC, true>(
+          CMN1Sample<MemoryFormat::kChannelsLast, true>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_dptr + in_image_elem_cnt * i,
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         } else {
-          CMN1Sample<TensorLayout::kNHWC, false>(
+          CMN1Sample<MemoryFormat::kChannelsLast, false>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_dptr + in_image_elem_cnt * i,
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         }
@@ -198,9 +195,9 @@ class CropMirrorNormalizeFromStaticShapeToFloatKernel final : public user_op::Op
 
 REGISTER_USER_KERNEL("crop_mirror_normalize_from_uint8")
     .SetCreateFn<CropMirrorNormalizeFromStaticShapeToFloatKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == DataType::kUInt8)
-                     & (user_op::HobDataType("out", 0) == DataType::kFloat));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == DataType::kUInt8)
+                     && (user_op::HobDataType("out", 0) == DataType::kFloat));
 
 class CropMirrorNormalizeFromTensorBufferToFloatKernel final : public user_op::OpKernel {
  public:
@@ -213,14 +210,15 @@ class CropMirrorNormalizeFromTensorBufferToFloatKernel final : public user_op::O
   }
 
  private:
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     auto* cmn_attr = dynamic_cast<CMNAttr*>(state);
     const std::vector<float>& mean_vec = cmn_attr->mean_vec();
     const std::vector<float>& inv_std_vec = cmn_attr->inv_std_vec();
     user_op::Tensor* in_blob = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out_blob = ctx->Tensor4ArgNameAndIndex("out", 0);
     std::vector<int8_t> mirror = GetMirrorVec(ctx);
-    int64_t record_num = in_blob->shape().At(0);
+    int64_t record_num = in_blob->shape_view().At(0);
     const std::string& color_space = ctx->Attr<std::string>("color_space");
     int64_t C = ImageUtil::IsColor(color_space) ? 3 : 1;
     float crop_pos_y = ctx->Attr<float>("crop_pos_y");
@@ -229,10 +227,10 @@ class CropMirrorNormalizeFromTensorBufferToFloatKernel final : public user_op::O
     float* out_dptr = out_blob->mut_dptr<float>();
 
     const TensorBuffer* in_buffers = in_blob->dptr<TensorBuffer>();
-    const ShapeView& in_shape = in_blob->shape();
+    const ShapeView& in_shape = in_blob->shape_view();
     int64_t N = in_shape.At(0);
     CHECK_EQ(in_shape.NumAxes(), 1);
-    const ShapeView& out_shape = out_blob->shape();
+    const ShapeView& out_shape = out_blob->shape_view();
     CHECK_EQ(out_shape.NumAxes(), 4);
     CHECK_EQ(out_shape.At(0), N);
     if (output_layout == "NCHW") {
@@ -248,11 +246,11 @@ class CropMirrorNormalizeFromTensorBufferToFloatKernel final : public user_op::O
         int64_t in_W = in_shape.At(1);
         CHECK_EQ(C, in_shape.At(2));
         if (mirror.at(i)) {
-          CMN1Sample<TensorLayout::kNCHW, true>(
+          CMN1Sample<MemoryFormat::kContiguous, true>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_buffer->data<uint8_t>(),
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         } else {
-          CMN1Sample<TensorLayout::kNCHW, false>(
+          CMN1Sample<MemoryFormat::kContiguous, false>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_buffer->data<uint8_t>(),
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         }
@@ -270,11 +268,11 @@ class CropMirrorNormalizeFromTensorBufferToFloatKernel final : public user_op::O
         int64_t in_W = in_shape.At(1);
         CHECK_EQ(C, in_shape.At(2));
         if (mirror.at(i)) {
-          CMN1Sample<TensorLayout::kNHWC, true>(
+          CMN1Sample<MemoryFormat::kChannelsLast, true>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_buffer->data<uint8_t>(),
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         } else {
-          CMN1Sample<TensorLayout::kNHWC, false>(
+          CMN1Sample<MemoryFormat::kChannelsLast, false>(
               C, in_H, in_W, out_H, out_W, crop_pos_y, crop_pos_x, in_buffer->data<uint8_t>(),
               out_dptr + out_image_elem_cnt * i, mean_vec, inv_std_vec);
         }
@@ -288,9 +286,9 @@ class CropMirrorNormalizeFromTensorBufferToFloatKernel final : public user_op::O
 
 REGISTER_USER_KERNEL("crop_mirror_normalize_from_tensorbuffer")
     .SetCreateFn<CropMirrorNormalizeFromTensorBufferToFloatKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("in", 0) == DataType::kTensorBuffer)
-                     & (user_op::HobDataType("out", 0) == DataType::kFloat));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == DataType::kTensorBuffer)
+                     && (user_op::HobDataType("out", 0) == DataType::kFloat));
 
 namespace {
 
@@ -316,17 +314,18 @@ class CoinFlipKernel final : public user_op::OpKernel {
   std::shared_ptr<user_op::OpKernelState> CreateOpKernelState(
       user_op::KernelInitContext* ctx) const override {
     float prob = ctx->Attr<float>("probability");
-    int64_t seed = GetOpKernelRandomSeed(ctx);
+    int64_t seed = CHECK_JUST(GetOpKernelRandomSeed(ctx));
     std::shared_ptr<RandBoolGen> rand_bool_gen(new RandBoolGen(prob, seed));
     return rand_bool_gen;
   }
 
  private:
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     auto* rand_bool_gen = dynamic_cast<RandBoolGen*>(state);
     user_op::Tensor* out_blob = ctx->Tensor4ArgNameAndIndex("out", 0);
     int8_t* dptr = out_blob->mut_dptr<int8_t>();
-    for (int32_t i = 0; i < out_blob->shape().elem_cnt(); ++i) {
+    for (int32_t i = 0; i < out_blob->shape_view().elem_cnt(); ++i) {
       *(dptr + i) = rand_bool_gen->GetNextBool() ? 1 : 0;
     }
   }
@@ -335,8 +334,8 @@ class CoinFlipKernel final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("coin_flip")
     .SetCreateFn<CoinFlipKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == "cpu")
-                     & (user_op::HobDataType("out", 0) == DataType::kInt8));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("out", 0) == DataType::kInt8));
 
 namespace {
 
@@ -361,7 +360,7 @@ void ImageRandomCropImpl(const TensorBuffer* in_buffer, TensorBuffer* out_buffer
   H = image.rows;
 
   CHECK(image.isContinuous());
-  const int c = in_buffer->shape().At(2);
+  const int c = in_buffer->shape_view().At(2);
   CHECK_EQ(c, image.channels());
   Shape image_shape({H, W, c});
   out_buffer->Resize(image_shape, in_buffer->data_type());
@@ -381,14 +380,15 @@ class ImageRandomCropKernel final : public user_op::OpKernel {
   }
 
  private:
-  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state) const override {
+  void Compute(user_op::KernelComputeContext* ctx, user_op::OpKernelState* state,
+               const user_op::OpKernelCache*) const override {
     auto* crop_window_generators = dynamic_cast<RandomCropKernelState*>(state);
     CHECK_NOTNULL(crop_window_generators);
     user_op::Tensor* out_blob = ctx->Tensor4ArgNameAndIndex("out", 0);
-    int64_t record_num = out_blob->shape().elem_cnt();
+    int64_t record_num = out_blob->shape_view().elem_cnt();
     CHECK(record_num > 0);
     user_op::Tensor* in_blob = ctx->Tensor4ArgNameAndIndex("in", 0);
-    CHECK_EQ(out_blob->shape(), in_blob->shape());
+    CHECK_EQ(out_blob->shape_view(), in_blob->shape_view());
     const TensorBuffer* in_buffers = in_blob->dptr<TensorBuffer>();
     TensorBuffer* out_buffers = out_blob->mut_dptr<TensorBuffer>();
     MultiThreadLoop(record_num, [&](size_t i) {
@@ -400,8 +400,8 @@ class ImageRandomCropKernel final : public user_op::OpKernel {
 
 REGISTER_USER_KERNEL("image_random_crop")
     .SetCreateFn<ImageRandomCropKernel>()
-    .SetIsMatchedHob((user_op::HobDeviceTag() == DeviceType::kCPU)
-                     & (user_op::HobDataType("in", 0) == DataType::kTensorBuffer)
-                     & (user_op::HobDataType("out", 0) == DataType::kTensorBuffer));
+    .SetIsMatchedHob((user_op::HobDeviceType() == DeviceType::kCPU)
+                     && (user_op::HobDataType("in", 0) == DataType::kTensorBuffer)
+                     && (user_op::HobDataType("out", 0) == DataType::kTensorBuffer));
 
 }  // namespace oneflow

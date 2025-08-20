@@ -22,21 +22,22 @@ import oneflow as flow
 import os
 
 import oneflow.unittest
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 
 @flow.unittest.skip_unless_1n2d()
-class TestConsistentCastModule_1n2d(flow.unittest.TestCase):
+@unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
+class TestGlobalCastModule_1n2d(flow.unittest.TestCase):
     def test_check_meta_consistency(test_case):
         if os.getenv("RANK") == "0":
             x = flow.ones((16, 16), device=flow.device("cuda"), dtype=flow.int32)
         else:
             x = flow.zeros((1,), device=flow.device("cuda"), dtype=flow.float)
-        placement = flow.placement("cuda", {0: [0]})
+        placement = flow.placement("cuda", ranks=[0])
         sbp = (flow.sbp.broadcast,)
-        y = x.to_consistent(placement=placement, sbp=sbp)
+        y = x.to_global(placement=placement, sbp=sbp)
         y.check_meta_consistency()
-        y = y.to_consistent(sbp=flow.sbp.split(0))
+        y = y.to_global(sbp=flow.sbp.split(0))
         y.check_meta_consistency()
 
 

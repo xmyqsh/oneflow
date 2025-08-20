@@ -18,37 +18,87 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestEq(flow.unittest.TestCase):
-    @autotest(auto_backward=False)
-    def test_eq_with_0shape_data(test_case):
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_eq_with_0_size_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(3, 2, 0, 3).to(device)
-        y = random_pytorch_tensor(3, 2, 0, 3).to(device)
+        x = random_tensor(3, 2, 0, 3).to(device)
+        y = random_tensor(3, 2, 0, 3).to(device)
         z = torch.eq(x, y)
         return z
 
-    @autotest(auto_backward=False)
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_eq_with_0shape_0d_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = random_tensor(ndim=0).to(device)
+        z = torch.eq(x, y)
+        return z
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
     def test_flow_eq_with_random_data(test_case):
         device = random_device()
-        shape = random_tensor().value().shape
-        x = random_pytorch_tensor(len(shape), *shape, requires_grad=False).to(device)
-        y = random_pytorch_tensor(len(shape), *shape, requires_grad=False).to(device)
+        shape = random_tensor().oneflow.shape
+        x = random_tensor(len(shape), *shape, requires_grad=False).to(device)
+        y = random_tensor(len(shape), *shape, requires_grad=False).to(device)
+        return torch.eq(x, oneof(y, random().to(int), random().to(float)))
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_flow_tensor_eq_with_random_data(test_case):
+        device = random_device()
+        shape = random_tensor().oneflow.shape
+        x = random_tensor(len(shape), *shape, requires_grad=False).to(device)
+        y = random_tensor(len(shape), *shape, requires_grad=False).to(device)
+        return x.eq(oneof(y, random().to(int), random().to(float)))
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_flow_eq_with_random_0d_data(test_case):
+        device = random_device()
+        shape = random_tensor().oneflow.shape
+        x = random_tensor(ndim=0, requires_grad=False).to(device)
+        y = random_tensor(ndim=0, requires_grad=False).to(device)
         return torch.eq(x, y)
 
-    @autotest(auto_backward=False)
+    @autotest(n=5, auto_backward=False, check_graph=True)
     def test_flow_eq_with_same_random_data(test_case):
         device = random_device()
-        shape = random_tensor().value().shape
-        x = random_pytorch_tensor(len(shape), *shape, requires_grad=False).to(device)
+        shape = random_tensor().oneflow.shape
+        x = random_tensor(len(shape), *shape, requires_grad=False).to(device)
         return torch.eq(x, x)
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_flow_eq_bool_with_random_data(test_case):
+        device = random_device()
+        shape = random_tensor().oneflow.shape
+        x = random_tensor(len(shape), *shape, requires_grad=False).to(
+            device=device, dtype=torch.bool
+        )
+        y = random_tensor(len(shape), *shape, requires_grad=False).to(
+            device=device, dtype=torch.bool
+        )
+        return torch.eq(x, y)
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_flow_eq_with_same_random_0d_data(test_case):
+        device = random_device()
+        shape = random_tensor().oneflow.shape
+        x = random_tensor(ndim=0, requires_grad=False).to(device)
+        return torch.eq(x, x)
+
+    @profile(torch.eq)
+    def profile_eq(test_case):
+        input1 = torch.ones(1000, 1280)
+        input2 = torch.ones(1000, 1280)
+        torch.eq(input1, input2)
 
 
 if __name__ == "__main__":

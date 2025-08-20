@@ -27,11 +27,11 @@ Shape GetFlatShape(const ShapeView& shape, int64_t axis) {
 }
 
 template<DeviceType device_type, typename T, typename K>
-void GatherForward(DeviceCtx* ctx, const Blob* indices, const Blob* in, int64_t axis, Blob* out,
+void GatherForward(ep::Stream* stream, const Blob* indices, const Blob* in, int64_t axis, Blob* out,
                    const int64_t offset) {
-  const Shape& flat_in_shape = GetFlatShape(in->shape(), axis);
-  GatherKernelUtilImpl<device_type, T, K>::Forward(ctx, indices->dptr<K>(),
-                                                   indices->shape().elem_cnt(), in->dptr<T>(),
+  const Shape& flat_in_shape = GetFlatShape(in->shape_view(), axis);
+  GatherKernelUtilImpl<device_type, T, K>::Forward(stream, indices->dptr<K>(),
+                                                   indices->shape_view().elem_cnt(), in->dptr<T>(),
                                                    flat_in_shape, out->mut_dptr<T>(), offset);
 }
 
@@ -49,27 +49,27 @@ struct GatherSwitchUtil final {
 }  // namespace
 
 template<DeviceType device_type, typename T>
-void GatherKernelUtil<device_type, T>::Forward(DeviceCtx* ctx, const Blob* indices, const Blob* in,
-                                               const int64_t axis, Blob* out) {
-  GatherKernelUtil<device_type, T>::Forward(ctx, indices, in, axis, out, 0);
+void GatherKernelUtil<device_type, T>::Forward(ep::Stream* stream, const Blob* indices,
+                                               const Blob* in, const int64_t axis, Blob* out) {
+  GatherKernelUtil<device_type, T>::Forward(stream, indices, in, axis, out, 0);
 }
 
 template<DeviceType device_type, typename T>
-void GatherKernelUtil<device_type, T>::Forward(DeviceCtx* ctx, const Blob* indices, const Blob* in,
-                                               const int64_t axis, Blob* out,
+void GatherKernelUtil<device_type, T>::Forward(ep::Stream* stream, const Blob* indices,
+                                               const Blob* in, const int64_t axis, Blob* out,
                                                const int64_t offset) {
-  GatherSwitchUtil<device_type, T>::SwitchGatherForward(SwitchCase(indices->data_type()), ctx,
+  GatherSwitchUtil<device_type, T>::SwitchGatherForward(SwitchCase(indices->data_type()), stream,
                                                         indices, in, axis, out, offset);
 }
 
 template<typename T, typename K>
 struct GatherKernelUtilImpl<DeviceType::kCPU, T, K> final {
-  static void Forward(DeviceCtx* ctx, const K* indices, int64_t num_indices, const T* in,
+  static void Forward(ep::Stream* stream, const K* indices, int64_t num_indices, const T* in,
                       const Shape& flat_in_shape, T* out, const int64_t offset);
 };
 
 template<typename T, typename K>
-void GatherKernelUtilImpl<DeviceType::kCPU, T, K>::Forward(DeviceCtx* ctx, const K* indices,
+void GatherKernelUtilImpl<DeviceType::kCPU, T, K>::Forward(ep::Stream* stream, const K* indices,
                                                            int64_t num_indices, const T* in,
                                                            const Shape& flat_in_shape, T* out,
                                                            const int64_t offset) {
@@ -85,7 +85,7 @@ void GatherKernelUtilImpl<DeviceType::kCPU, T, K>::Forward(DeviceCtx* ctx, const
         const T* from = in + outer_idx * gather_dim_size * inner_dim_size + idx * inner_dim_size;
         std::copy(from, from + inner_dim_size, to);
       } else {
-        std::memset(reinterpret_cast<void*>(to), 0, inner_dim_size * sizeof(K));
+        std::memset(reinterpret_cast<void*>(to), 0, inner_dim_size * sizeof(T));
       }
     }
   }
@@ -94,14 +94,19 @@ void GatherKernelUtilImpl<DeviceType::kCPU, T, K>::Forward(DeviceCtx* ctx, const
 #define INITIATE_GATHER_KERNEL_UTIL_CPU_IMPL(in_type_pair, index_type_pair)              \
   template struct GatherKernelUtilImpl<DeviceType::kCPU, OF_PP_PAIR_FIRST(in_type_pair), \
                                        OF_PP_PAIR_FIRST(index_type_pair)>;
-OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(INITIATE_GATHER_KERNEL_UTIL_CPU_IMPL, GATHER_DATA_TYPE_SEQ,
-                                 INDEX_DATA_TYPE_SEQ);
+OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(INITIATE_GATHER_KERNEL_UTIL_CPU_IMPL,
+                                 GATHER_DATA_TYPE_SEQ FLOAT16_DATA_TYPE_SEQ BFLOAT16_DATA_TYPE_SEQ,
+                                 GATHER_INDEX_TYPE_SEQ);
 #undef INITIATE_GATHER_KERNEL_UTIL_CPU_IMPL
 
 #define INITIATE_GATHER_KERNEL_UTIL(device_type, in_type_pair) \
   template struct GatherKernelUtil<device_type, OF_PP_PAIR_FIRST(in_type_pair)>;
 OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(INITIATE_GATHER_KERNEL_UTIL, DEVICE_TYPE_SEQ,
                                  GATHER_DATA_TYPE_SEQ);
+// For cpu float16/bfloat16
+OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(INITIATE_GATHER_KERNEL_UTIL,
+                                 OF_PP_MAKE_TUPLE_SEQ(DeviceType::kCPU),
+                                 FLOAT16_DATA_TYPE_SEQ BFLOAT16_DATA_TYPE_SEQ);
 #undef INITIATE_GATHER_KERNEL_UTIL
 
 }  // namespace oneflow

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/framework/user_op_def.h"
+#include "oneflow/core/framework/attr_value.h"
 #include "oneflow/core/framework/attr_value_accessor.h"
 
 namespace oneflow {
@@ -49,12 +50,6 @@ bool UserOpDefWrapper::IsArgOptional(const std::string& name) const {
   const UserOpDef::ArgDef* arg_def = GetArgPointer(name);
   CHECK_NOTNULL(arg_def);
   return arg_def->is_optional();
-}
-
-std::pair<int32_t, bool> UserOpDefWrapper::ArgNumAndIsMin(const std::string& name) const {
-  const UserOpDef::ArgDef* arg_def = GetArgPointer(name);
-  CHECK_NOTNULL(arg_def);
-  return std::make_pair(arg_def->num(), arg_def->num_as_min());
 }
 
 const UserOpDef::ArgDef* UserOpDefWrapper::GetArgPointer(const std::string& name) const {

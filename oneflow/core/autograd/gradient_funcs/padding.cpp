@@ -15,29 +15,30 @@ limitations under the License.
 */
 #include "oneflow/core/framework/op_expr_grad_function.h"
 #include "oneflow/core/functional/functional.h"
+#include "oneflow/core/common/container_util.h"
 
 namespace oneflow {
 namespace one {
 
-struct Pad2dCaptureState : public AutoGradCaptureState {
-  bool requires_grad;
-  std::vector<int64_t> paddings;
+struct PadNdCaptureState : public AutoGradCaptureState {
+  bool requires_grad = false;
+  std::vector<int64_t> paddings{};
 };
 
-class Pad2d : public OpExprGradFunction<Pad2dCaptureState> {
+class PadNd : public OpExprGradFunction<PadNdCaptureState> {
  public:
   Maybe<void> Init(const OpExpr& op) override {
     const UserOpExpr* fw_op_expr = dynamic_cast<const UserOpExpr*>(&op);
-    CHECK_NOTNULL_OR_RETURN(fw_op_expr);
+    CHECK_NOTNULL_OR_RETURN(fw_op_expr);  // NOLINT(maybe-need-error-msg)
     base_attrs_ = MakeAttrMapFromUserOpConf(fw_op_expr->proto());
     return Maybe<void>::Ok();
   }
 
-  Maybe<void> Capture(Pad2dCaptureState* ctx, const TensorTuple& inputs, const TensorTuple& outputs,
+  Maybe<void> Capture(PadNdCaptureState* ctx, const TensorTuple& inputs, const TensorTuple& outputs,
                       const AttrMap& attrs) const override {
-    CHECK_EQ_OR_RETURN(inputs.size(), 1);
-    CHECK_EQ_OR_RETURN(outputs.size(), 1);
-    ctx->requires_grad = inputs.at(0)->requires_grad();
+    CHECK_EQ_OR_RETURN(inputs.size(), 1);   // NOLINT(maybe-need-error-msg)
+    CHECK_EQ_OR_RETURN(outputs.size(), 1);  // NOLINT(maybe-need-error-msg)
+    ctx->requires_grad = JUST(VectorAt(inputs, 0))->requires_grad();
     if (!ctx->requires_grad) { return Maybe<void>::Ok(); }
 
     ComposedAttrMap composed_attrs(attrs, base_attrs_);
@@ -49,76 +50,68 @@ class Pad2d : public OpExprGradFunction<Pad2dCaptureState> {
   AttrMap base_attrs_;
 };
 
-class ReflectionPad2d : public Pad2d {
+class ReflectionPadNd : public PadNd {
  public:
-  Maybe<void> Apply(const Pad2dCaptureState* ctx, const TensorTuple& out_grads,
+  Maybe<void> Apply(const PadNdCaptureState* ctx, const TensorTuple& out_grads,
                     TensorTuple* in_grads) const override {
-    CHECK_EQ_OR_RETURN(out_grads.size(), 1);
+    CHECK_EQ_OR_RETURN(out_grads.size(), 1);  // NOLINT(maybe-need-error-msg)
     in_grads->resize(1);
     if (ctx->requires_grad) {
-      in_grads->at(0) = JUST(functional::PadGrad(out_grads.at(0), ctx->paddings, "reflect", 0));
+      (*in_grads)[0] =
+          JUST(functional::PadGrad(JUST(VectorAt(out_grads, 0)), ctx->paddings, "reflect", 0));
     }
     return Maybe<void>::Ok();
   }
 };
 
-class ReplicationPad2d : public Pad2d {
+class ReplicationPadNd : public PadNd {
  public:
-  Maybe<void> Apply(const Pad2dCaptureState* ctx, const TensorTuple& out_grads,
+  Maybe<void> Apply(const PadNdCaptureState* ctx, const TensorTuple& out_grads,
                     TensorTuple* in_grads) const override {
-    CHECK_EQ_OR_RETURN(out_grads.size(), 1);
+    CHECK_EQ_OR_RETURN(out_grads.size(), 1);  // NOLINT(maybe-need-error-msg)
     in_grads->resize(1);
     if (ctx->requires_grad) {
-      in_grads->at(0) = JUST(functional::PadGrad(out_grads.at(0), ctx->paddings, "replicate", 0));
+      (*in_grads)[0] =
+          JUST(functional::PadGrad(JUST(VectorAt(out_grads, 0)), ctx->paddings, "replicate", 0));
     }
     return Maybe<void>::Ok();
   }
 };
-
-REGISTER_OP_EXPR_GRAD_FUNCTION("reflection_pad2d", ReflectionPad2d);
-REGISTER_OP_EXPR_GRAD_FUNCTION("replication_pad2d", ReplicationPad2d);
 
 struct ConstantPadNdCaptureState : public AutoGradCaptureState {
   bool requires_grad;
   std::vector<int64_t> paddings;
-  functional::Scalar padding_value;
 };
 
 class ConstantPadNd : public OpExprGradFunction<ConstantPadNdCaptureState> {
  public:
   Maybe<void> Init(const OpExpr& op) override {
     const UserOpExpr* fw_op_expr = dynamic_cast<const UserOpExpr*>(&op);
-    CHECK_NOTNULL_OR_RETURN(fw_op_expr);
+    CHECK_NOTNULL_OR_RETURN(fw_op_expr);  // NOLINT(maybe-need-error-msg)
     base_attrs_ = MakeAttrMapFromUserOpConf(fw_op_expr->proto());
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Capture(ConstantPadNdCaptureState* ctx, const TensorTuple& inputs,
                       const TensorTuple& outputs, const AttrMap& attrs) const override {
-    CHECK_EQ_OR_RETURN(inputs.size(), 1);
-    CHECK_EQ_OR_RETURN(outputs.size(), 1);
-    ctx->requires_grad = inputs.at(0)->requires_grad();
+    CHECK_EQ_OR_RETURN(inputs.size(), 1);   // NOLINT(maybe-need-error-msg)
+    CHECK_EQ_OR_RETURN(outputs.size(), 1);  // NOLINT(maybe-need-error-msg)
+    const std::shared_ptr<Tensor>& input_0 = JUST(VectorAt(inputs, 0));
+    ctx->requires_grad = input_0->requires_grad();
     if (!ctx->requires_grad) { return Maybe<void>::Ok(); }
 
     ComposedAttrMap composed_attrs(attrs, base_attrs_);
     ctx->paddings = JUST(composed_attrs.GetAttr<std::vector<int64_t>>("padding"));
-    if (IsFloatingDataType(inputs.at(0)->dtype()->data_type())) {
-      ctx->padding_value = JUST(composed_attrs.GetAttr<double>("floating_value"));
-    } else if (IsIntegralDataType(inputs.at(0)->dtype()->data_type())) {
-      ctx->padding_value = JUST(composed_attrs.GetAttr<int64_t>("integral_value"));
-    } else {
-      UNIMPLEMENTED_THEN_RETURN() << "Data type should be floating or integral type.";
-    }
+    for (int i = 0; i < ctx->paddings.size(); i++) { ctx->paddings[i] = -ctx->paddings[i]; }
     return Maybe<void>::Ok();
   }
-
   Maybe<void> Apply(const ConstantPadNdCaptureState* ctx, const TensorTuple& out_grads,
                     TensorTuple* in_grads) const override {
-    CHECK_EQ_OR_RETURN(out_grads.size(), 1);
+    CHECK_EQ_OR_RETURN(out_grads.size(), 1);  // NOLINT(maybe-need-error-msg)
     in_grads->resize(1);
     if (ctx->requires_grad) {
-      in_grads->at(0) =
-          JUST(functional::PadGrad(out_grads.at(0), ctx->paddings, "constant", ctx->padding_value));
+      (*in_grads)[0] =
+          JUST(functional::Pad(JUST(VectorAt(out_grads, 0)), ctx->paddings, "constant", Scalar(0)));
     }
     return Maybe<void>::Ok();
   }
@@ -127,9 +120,11 @@ class ConstantPadNd : public OpExprGradFunction<ConstantPadNdCaptureState> {
   AttrMap base_attrs_;
 };
 
-REGISTER_OP_EXPR_GRAD_FUNCTION("constant_pad1d", ConstantPadNd);
-REGISTER_OP_EXPR_GRAD_FUNCTION("constant_pad2d", ConstantPadNd);
-REGISTER_OP_EXPR_GRAD_FUNCTION("constant_pad3d", ConstantPadNd);
+REGISTER_OP_EXPR_GRAD_FUNCTION("pad", ConstantPadNd);
+REGISTER_OP_EXPR_GRAD_FUNCTION("reflection_pad1d", ReflectionPadNd);
+REGISTER_OP_EXPR_GRAD_FUNCTION("reflection_pad2d", ReflectionPadNd);
+REGISTER_OP_EXPR_GRAD_FUNCTION("replication_pad1d", ReplicationPadNd);
+REGISTER_OP_EXPR_GRAD_FUNCTION("replication_pad2d", ReplicationPadNd);
 
 }  // namespace one
 }  // namespace oneflow

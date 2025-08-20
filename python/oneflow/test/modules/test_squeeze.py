@@ -18,8 +18,9 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from automated_test_util import *
-from test_util import GenArgList
+
+from oneflow.test_utils.automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
@@ -27,7 +28,7 @@ import oneflow.unittest
 
 def _test_squeeze(test_case, device):
     np_arr = np.random.rand(1, 1, 1, 3)
-    input = flow.Tensor(np_arr, device=flow.device(device))
+    input = flow.tensor(np_arr, dtype=flow.float32, device=flow.device(device))
     of_shape = flow.squeeze(input, dim=[1, 2]).numpy().shape
     np_shape = (1, 3)
     test_case.assertTrue(np.array_equal(of_shape, np_shape))
@@ -43,14 +44,14 @@ def _test_squeeze(test_case, device):
 
 def _test_squeeze_1d_input(test_case, device):
     np_arr = np.random.rand(10)
-    input = flow.Tensor(np_arr, device=flow.device(device))
+    input = flow.tensor(np_arr, dtype=flow.float32, device=flow.device(device))
     output = flow.squeeze(input)
     test_case.assertTrue(np.allclose(output.numpy(), np_arr, 1e-05, 1e-05))
 
 
 def _test_tensor_squeeze(test_case, device):
     np_arr = np.random.rand(1, 1, 1, 3)
-    input = flow.Tensor(np_arr, device=flow.device(device))
+    input = flow.tensor(np_arr, dtype=flow.float32, device=flow.device(device))
     of_shape = input.squeeze(dim=[1, 2]).numpy().shape
     np_shape = (1, 3)
     test_case.assertTrue(np.array_equal(of_shape, np_shape))
@@ -66,7 +67,7 @@ def _test_tensor_squeeze(test_case, device):
 
 def _test_squeeze_int(test_case, device):
     np_arr = np.random.rand(1, 1, 1, 3)
-    input = flow.Tensor(np_arr, device=flow.device(device))
+    input = flow.tensor(np_arr, dtype=flow.float32, device=flow.device(device))
     of_shape = flow.squeeze(input, 1).numpy().shape
     np_shape = (1, 1, 3)
     test_case.assertTrue(np.array_equal(of_shape, np_shape))
@@ -79,7 +80,9 @@ def _test_squeeze_int(test_case, device):
 
 def _test_squeeze_backward(test_case, device):
     np_arr = np.random.rand(1, 1, 1, 3)
-    input = flow.Tensor(np_arr, device=flow.device(device), requires_grad=True)
+    input = flow.tensor(
+        np_arr, dtype=flow.float32, device=flow.device(device), requires_grad=True
+    )
     y = flow.squeeze(input, dim=1).sum()
     y.backward()
     np_grad = np.ones((1, 1, 1, 3))
@@ -101,18 +104,32 @@ class TestSqueeze(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest()
+    @autotest(check_graph=True)
     def test_flow_squeeze_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = torch.squeeze(x, random(1, 3).to(int))
         return y
 
-    @autotest(auto_backward=False)
-    def test_squeeze_with_0shape_data(test_case):
+    @autotest(n=10, check_graph=False, auto_backward=False)
+    def test_inplace_squeeze_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(3, 2, 1, 0).to(device)
+        x = random_tensor(requires_grad=False).to(device)
+        y = x.squeeze_(random(1, 3).to(int))
+        return y
+
+    @autotest(auto_backward=False, check_graph=True)
+    def test_squeeze_with_0_size_data(test_case):
+        device = random_device()
+        x = random_tensor(3, 2, 1, 0).to(device)
         y = torch.squeeze(x)
+        return y
+
+    @autotest(auto_backward=False, check_graph=True)
+    def test_flow_squeeze_bool_with_random_data(test_case):
+        device = random_device()
+        x = random_tensor().to(device=device, dtype=torch.bool)
+        y = torch.squeeze(x, random(1, 3).to(int))
         return y
 
 

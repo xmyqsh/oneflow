@@ -13,8 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include <mutex>
-#include "oneflow/core/common/util.h"
 #include "oneflow/core/framework/session_util.h"
 
 namespace oneflow {
@@ -26,11 +24,6 @@ std::mutex* GlobalSessionUtilMutex() {
   return &global_id2session_map_mutex;
 }
 
-HashMap<int64_t, std::shared_ptr<Session>>* GlobalId2SessionMap() {
-  static HashMap<int64_t, std::shared_ptr<Session>> id2session_map;
-  return &id2session_map;
-}
-
 std::vector<int64_t>* RegsiteredSessionIds() {
   static std::vector<int64_t> default_sess_id;
   return &default_sess_id;
@@ -38,45 +31,11 @@ std::vector<int64_t>* RegsiteredSessionIds() {
 
 Maybe<void> SetDefaultSessionId(int64_t val) {
   std::vector<int64_t>* ids = RegsiteredSessionIds();
-  ids->push_back(val);
+  ids->emplace_back(val);
   return Maybe<void>::Ok();
 }
 
 }  // namespace
-
-Session::Session(int64_t id)
-    : id_(id), is_mirrored_strategy_enabled_stack_(new std::vector<bool>()) {
-  instruction_list_.reset(new vm::InstructionMsgList());
-  eager_symbol_list_.reset(new vm::cfg::EagerSymbolList());
-}
-
-int64_t Session::id() const { return id_; }
-
-const std::shared_ptr<vm::InstructionMsgList>& Session::instruction_list() const {
-  return instruction_list_;
-}
-
-std::shared_ptr<vm::cfg::EagerSymbolList> Session::eager_symbol_list() const {
-  return eager_symbol_list_;
-}
-
-Maybe<void> Session::PushMirroredStrategyEnabled(bool is_mirrored) {
-  is_mirrored_strategy_enabled_stack_->push_back(is_mirrored);
-  return Maybe<void>::Ok();
-}
-Maybe<void> Session::PopMirroredStrategyEnabled() {
-  is_mirrored_strategy_enabled_stack_->pop_back();
-  return Maybe<void>::Ok();
-}
-
-Maybe<bool> Session::IsMirroredStrategyEnabled() const {
-  return is_mirrored_strategy_enabled_stack_->size() > 0
-         && is_mirrored_strategy_enabled_stack_->back();
-}
-Maybe<bool> Session::IsConsistentStrategyEnabled() const {
-  return is_mirrored_strategy_enabled_stack_->size() > 0
-         && !is_mirrored_strategy_enabled_stack_->back();
-}
 
 Maybe<int64_t> GetDefaultSessionId() {
   std::unique_lock<std::mutex> lock(*GlobalSessionUtilMutex());
@@ -85,38 +44,22 @@ Maybe<int64_t> GetDefaultSessionId() {
   return regsitered_ids.back();
 }
 
-Maybe<Session> RegsiterSession(int64_t id) {
-  std::shared_ptr<Session> sess = std::make_shared<Session>(id);
+bool RegsterSessionId(int64_t session_id) {
   std::unique_lock<std::mutex> lock(*GlobalSessionUtilMutex());
-  auto* id2session_map = GlobalId2SessionMap();
-  CHECK_OR_RETURN(id2session_map->find(id) == id2session_map->end());
-  (*id2session_map)[id] = sess;
-  JUST(SetDefaultSessionId(id));
-  return id2session_map->at(id);
+  auto* regsitered_ids = RegsiteredSessionIds();
+  auto itor = std::find(regsitered_ids->begin(), regsitered_ids->end(), session_id);
+  if (itor != regsitered_ids->end()) { return false; }
+  regsitered_ids->push_back(session_id);
+  return true;
 }
 
-Maybe<Session> GetDefaultSession() {
+bool ClearSessionId(int64_t session_id) {
   std::unique_lock<std::mutex> lock(*GlobalSessionUtilMutex());
-  const auto& regsitered_ids = *(RegsiteredSessionIds());
-  CHECK_GT_OR_RETURN(regsitered_ids.size(), 0);
-  int64_t default_sess_id = regsitered_ids.back();
-  auto* id2session_map = GlobalId2SessionMap();
-  CHECK_OR_RETURN(id2session_map->find(default_sess_id) != id2session_map->end());
-  return id2session_map->at(default_sess_id);
-}
-
-Maybe<void> ClearSessionById(int64_t id) {
-  std::unique_lock<std::mutex> lock(*GlobalSessionUtilMutex());
-  auto* id2session_map = GlobalId2SessionMap();
-  CHECK_OR_RETURN(id2session_map->find(id) != id2session_map->end());
-  id2session_map->erase(id);
-  auto* sess_ids = RegsiteredSessionIds();
-  int32_t i = 0;
-  for (; i < sess_ids->size(); ++i) {
-    if (sess_ids->at(i) == id) { break; }
-  }
-  sess_ids->erase(sess_ids->begin() + i);
-  return Maybe<void>::Ok();
+  auto* regsitered_ids = RegsiteredSessionIds();
+  auto itor = std::find(regsitered_ids->begin(), regsitered_ids->end(), session_id);
+  if (itor == regsitered_ids->end()) { return false; }
+  regsitered_ids->erase(itor);
+  return true;
 }
 
 }  // namespace oneflow

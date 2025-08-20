@@ -21,11 +21,13 @@ limitations under the License.
 // basic
 #define OF_PP_CAT(a, b) OF_PP_INTERNAL_CAT(a, b)
 
-#define OF_PP_STRINGIZE(x) OF_PP_INTERNAL_STRINGIZE(x)
+#define OF_PP_STRINGIZE(...) OF_PP_INTERNAL_STRINGIZE(__VA_ARGS__)
 
 #define OF_PP_PAIR_FIRST(pair) OF_PP_INTERNAL_PAIR_FIRST(pair)
 
 #define OF_PP_PAIR_SECOND(pair) OF_PP_INTERNAL_PAIR_SECOND(pair)
+
+#define OF_PP_PAIR_THIRD(pair) OF_PP_INTERNAL_PAIR_THIRD(pair)
 
 #define OF_PP_TUPLE_SIZE(t) OF_PP_INTERNAL_TUPLE_SIZE(t)
 

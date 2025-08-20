@@ -15,6 +15,7 @@ limitations under the License.
 */
 #include "oneflow/core/graph/boxing/boxing_logger.h"
 #include "oneflow/core/job/sbp_parallel.h"
+#include "oneflow/core/framework/nd_sbp.h"
 
 namespace oneflow {
 
@@ -56,30 +57,30 @@ std::string ParallelDescToString(const ParallelDesc& parallel_desc) {
   return serialized_parallel_desc;
 }
 
-std::string NdSbpToString(const cfg::NdSbp& nd_sbp) {
-  std::string serialized_nd_sbp;
-  const int64_t num_axes = nd_sbp.sbp_parallel_size();
-  serialized_nd_sbp += "[";
-  for (int64_t i = 0; i < num_axes - 1; ++i) {
-    serialized_nd_sbp += SbpParallelToString(nd_sbp.sbp_parallel(i)) + " ";
+std::string NdSbpToCsvString(const NdSbp& nd_sbp) {
+  std::ostringstream ss;
+  ss << "(";
+  for (size_t i = 0; i < nd_sbp.sbp_parallel_size(); ++i) {
+    if (i > 0) { ss << " "; }
+    ss << SbpToString(nd_sbp.sbp_parallel(i));
   }
-  serialized_nd_sbp += SbpParallelToString(nd_sbp.sbp_parallel(num_axes - 1)) + "]";
-  return serialized_nd_sbp;
+  ss << ")";
+  return ss.str();
 }
 
 std::string MakeBoxingLoggerCsvRow(const SubTskGphBuilderStatus& status,
                                    const std::string& src_op_name, const std::string& dst_op_name,
                                    const ParallelDesc& src_parallel_desc,
-                                   const ParallelDesc& dst_parallel_desc,
-                                   const cfg::NdSbp& src_nd_sbp, const cfg::NdSbp& dst_nd_sbp,
-                                   const LogicalBlobId& lbi, const BlobDesc& logical_blob_desc) {
+                                   const ParallelDesc& dst_parallel_desc, const NdSbp& src_nd_sbp,
+                                   const NdSbp& dst_nd_sbp, const LogicalBlobId& lbi,
+                                   const BlobDesc& logical_blob_desc) {
   std::string serialized_status;
   serialized_status += src_op_name + ",";
   serialized_status += dst_op_name + ",";
   serialized_status += ParallelDescToString(src_parallel_desc) + ",";
   serialized_status += ParallelDescToString(dst_parallel_desc) + ",";
-  serialized_status += NdSbpToString(src_nd_sbp) + ",";
-  serialized_status += NdSbpToString(dst_nd_sbp) + ",";
+  serialized_status += NdSbpToCsvString(src_nd_sbp) + ",";
+  serialized_status += NdSbpToCsvString(dst_nd_sbp) + ",";
   serialized_status += GenLogicalBlobName(lbi) + ",";
   serialized_status += DataType_Name(logical_blob_desc.data_type()) + ",";
   serialized_status += ShapeToString(logical_blob_desc.shape()) + ",";
@@ -104,8 +105,8 @@ CsvBoxingLogger::~CsvBoxingLogger() { log_stream_->Flush(); }
 
 void CsvBoxingLogger::Log(const SubTskGphBuilderStatus& status, const std::string& src_op_name,
                           const std::string& dst_op_name, const ParallelDesc& src_parallel_desc,
-                          const ParallelDesc& dst_parallel_desc, const cfg::NdSbp& src_nd_sbp,
-                          const cfg::NdSbp& dst_nd_sbp, const LogicalBlobId& lbi,
+                          const ParallelDesc& dst_parallel_desc, const NdSbp& src_nd_sbp,
+                          const NdSbp& dst_nd_sbp, const LogicalBlobId& lbi,
                           const BlobDesc& logical_blob_desc) {
   log_stream_ << MakeBoxingLoggerCsvRow(status, src_op_name, dst_op_name, src_parallel_desc,
                                         dst_parallel_desc, src_nd_sbp, dst_nd_sbp, lbi,

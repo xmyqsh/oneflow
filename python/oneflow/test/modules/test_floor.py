@@ -18,16 +18,17 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_floor(test_case, shape, device):
     np_input = np.random.randn(*shape)
-    of_input = flow.Tensor(
+    of_input = flow.tensor(
         np_input, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     of_out = flow.floor(of_input)
@@ -52,12 +53,31 @@ class TestFloor(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             _test_floor(test_case, *arg)
 
-    @autotest()
+    @autotest(check_graph=True)
     def test_flow_floor_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = torch.floor(x)
         return y
+
+    @autotest(check_graph=True)
+    def test_flow_floor_inplace_with_random_data(test_case):
+        device = random_device()
+        x = random_tensor().to(device)
+        y = x + 1
+        y.floor_()
+        return y
+
+    @autotest(check_graph=True)
+    def test_flow_floor_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = torch.floor(x)
+        return y
+
+    @profile(torch.floor)
+    def profile_floor(test_case):
+        torch.floor(torch.ones(100, 100, 100))
 
 
 if __name__ == "__main__":

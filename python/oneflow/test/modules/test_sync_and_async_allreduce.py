@@ -16,12 +16,13 @@ limitations under the License.
 
 import unittest
 import numpy as np
+import os
 import oneflow as flow
 import oneflow.unittest
 
 
 def sync_allreduce(x):
-    return x.to_consistent(sbp=flow.sbp.broadcast)
+    return x.to_global(sbp=flow.sbp.broadcast)
 
 
 def async_allreduce(x):
@@ -29,9 +30,10 @@ def async_allreduce(x):
 
 
 @flow.unittest.skip_unless_1n4d()
+@unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
 class TestP2bOnGPU(flow.unittest.TestCase):
     def test_p2b(test_case):
-        placement = flow.placement("cuda", {0: range(4)})
+        placement = flow.placement("cuda", range(4))
         sync_x = flow.ones(
             (128, 1024),
             placement=placement,

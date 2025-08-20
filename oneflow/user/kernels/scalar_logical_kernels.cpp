@@ -13,20 +13,34 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "oneflow/user/kernels/scalar_logical_kernels.h"
+#include "oneflow/core/framework/framework.h"
+#include "oneflow/core/kernel/cuda_graph_support.h"
+#include "oneflow/core/ep/include/primitive/broadcast_elementwise_binary.h"
 
 namespace oneflow {
 
-template<template<typename T> class BIN_OP, typename T>
-struct ScalarLogicalFunctor<DeviceType::kCPU, BIN_OP, T> final {
-  void operator()(DeviceCtx* ctx, const int64_t elem_cnt, const T scalar, const T* in,
-                  int8_t* out) {
-    DoScalarLogical<BIN_OP, T>(elem_cnt, scalar, in, out);
-  }
-};
+namespace {
 
-template<DeviceType device_type, template<typename> class BIN_OP, typename T>
-class ScalarLogicalKernel final : public user_op::OpKernel {
+template<typename Context>
+std::unique_ptr<ep::primitive::BroadcastElementwiseBinary> NewBinaryPrimitive(
+    Context* ctx, ep::primitive::BinaryOp op) {
+  const user_op::TensorDesc* in = ctx->TensorDesc4ArgNameAndIndex("in", 0);
+  const user_op::TensorDesc* out = ctx->TensorDesc4ArgNameAndIndex("out", 0);
+  const int64_t ndims = in->shape().NumAxes();
+  return ep::primitive::NewPrimitive<ep::primitive::BroadcastElementwiseBinaryFactory>(
+      ctx->device_type(), op, in->data_type(), out->data_type(), ndims);
+}
+
+template<ep::primitive::BinaryOp op>
+auto PrimitiveExists() {
+  return hob::make_custom("BroadcastElementwiseBinaryPrimitiveExists",
+                          [](const user_op::KernelRegContext& ctx) {
+                            return NewBinaryPrimitive(&ctx, op).operator bool();
+                          });
+}
+
+template<ep::primitive::BinaryOp op>
+class ScalarLogicalKernel final : public user_op::OpKernel, public user_op::CudaGraphSupport {
  public:
   ScalarLogicalKernel() = default;
   ~ScalarLogicalKernel() = default;
@@ -35,21 +49,22 @@ class ScalarLogicalKernel final : public user_op::OpKernel {
   void Compute(user_op::KernelComputeContext* ctx) const override {
     const user_op::Tensor* in = ctx->Tensor4ArgNameAndIndex("in", 0);
     user_op::Tensor* out = ctx->Tensor4ArgNameAndIndex("out", 0);
-    T scalar_operand = static_cast<T>(0);
+    Scalar scalar_operand;
     if (ctx->Attr<bool>("has_int_operand")) {
-      scalar_operand = static_cast<T>(ctx->Attr<int64_t>("int_operand"));
+      scalar_operand = ctx->Attr<int64_t>("int_operand");
     } else if (ctx->Attr<bool>("has_float_operand")) {
-      scalar_operand = static_cast<T>(ctx->Attr<double>("float_operand"));
+      scalar_operand = ctx->Attr<double>("float_operand");
     } else {
       UNIMPLEMENTED();
     }
-    const T* in_ptr = in->dptr<T>();
-    int8_t* out_ptr = out->mut_dptr<int8_t>();
 
-    int64_t elem_cnt = out->shape().elem_cnt();
+    int64_t elem_cnt = out->shape_view().elem_cnt();
     if (elem_cnt != 0) {
-      ScalarLogicalFunctor<device_type, BIN_OP, T>()(ctx->device_ctx(), elem_cnt, scalar_operand,
-                                                     in_ptr, out_ptr);
+      std::unique_ptr<ep::primitive::BroadcastElementwiseBinary> primitive =
+          NewBinaryPrimitive(ctx, op);
+      CHECK(primitive);
+      primitive->Launch(ctx->stream(), in->shape_view().NumAxes(), in->shape_view().ptr(),
+                        in->dptr(), scalar_operand, out->mut_dptr());
     } else {
       // For 0-d Tensor
       return;
@@ -58,43 +73,30 @@ class ScalarLogicalKernel final : public user_op::OpKernel {
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, kernel_name, binary_op, \
-                                                           input_dtype)                    \
-  REGISTER_USER_KERNEL(kernel_name)                                                        \
-      .SetCreateFn<ScalarLogicalKernel<device, binary_op, input_dtype>>()                  \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == device)                                 \
-                       & (user_op::HobDataType("in", 0) == GetDataType<input_dtype>::value));
+#define REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(kernel_name, binary_op) \
+  REGISTER_USER_KERNEL(kernel_name)                                                \
+      .SetCreateFn<ScalarLogicalKernel<binary_op>>()                               \
+      .SetIsMatchedHob(PrimitiveExists<binary_op>());
 
-#define REGISTER_SCALAR_LOGICAL_KERNEL(device, dtype)                                              \
-  REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, "scalar_logical_equal", BinaryFuncEQ, \
-                                                     dtype);                                       \
-  REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, "scalar_logical_not_equal",           \
-                                                     BinaryFuncNE, dtype);                         \
-  REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, "scalar_logical_greater",             \
-                                                     BinaryFuncGT, dtype);                         \
-  REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, "scalar_logical_greater_equal",       \
-                                                     BinaryFuncGE, dtype);                         \
-  REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, "scalar_logical_less", BinaryFuncLT,  \
-                                                     dtype);                                       \
-  REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL(device, "scalar_logical_less_equal",          \
-                                                     BinaryFuncLE, dtype);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_equal",
+                                                   ep::primitive::BinaryOp::kEqual);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_not_equal",
+                                                   ep::primitive::BinaryOp::kNotEqual);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_greater",
+                                                   ep::primitive::BinaryOp::kGreaterThan);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_greater_equal",
+                                                   ep::primitive::BinaryOp::kGreaterEqual);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_less",
+                                                   ep::primitive::BinaryOp::kLessThan);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_less_equal",
+                                                   ep::primitive::BinaryOp::kLessEqual);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_or",
+                                                   ep::primitive::BinaryOp::kLogicalOr);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_xor",
+                                                   ep::primitive::BinaryOp::kLogicalXor);
+REGISTER_UNARY_LOGICAL_SCALAR_ELEMWISE_USER_KERNEL("scalar_logical_and",
+                                                   ep::primitive::BinaryOp::kLogicalAnd);
 
-#define REGISTER_SCALAR_LOGICAL_CPU_KERNELS()               \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kCPU, int32_t) \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kCPU, int64_t) \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kCPU, float)   \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kCPU, double)
-
-#define REGISTER_SCALAR_LOGICAL_GPU_KERNELS()               \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kGPU, int32_t) \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kGPU, int64_t) \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kGPU, float)   \
-  REGISTER_SCALAR_LOGICAL_KERNEL(DeviceType::kGPU, double)
-
-REGISTER_SCALAR_LOGICAL_CPU_KERNELS();
-
-#ifdef WITH_CUDA
-REGISTER_SCALAR_LOGICAL_GPU_KERNELS();
-#endif  // WITH_CUDA
+}  // namespace
 
 }  // namespace oneflow

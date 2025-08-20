@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/framework/framework.h"
+#include "oneflow/core/framework/op_generated.h"
 
 namespace oneflow {
 
@@ -22,19 +23,30 @@ namespace {
 Maybe<void> InferTensorDescFn(user_op::InferContext* ctx) {
   const user_op::TensorDesc& prediction_desc = ctx->InputTensorDesc("prediction", 0);
   const user_op::TensorDesc& label_desc = ctx->InputTensorDesc("label", 0);
-  CHECK_EQ_OR_RETURN(prediction_desc.is_dynamic(), label_desc.is_dynamic());
-  CHECK_GE_OR_RETURN(prediction_desc.shape().NumAxes(), 2);
+  CHECK_EQ_OR_RETURN(prediction_desc.is_dynamic(), label_desc.is_dynamic())
+      << Error::RuntimeError()
+      << "prediction and label are expected to have the same dynamic property, but found "
+      << prediction_desc.is_dynamic() << " and " << label_desc.is_dynamic();
+  CHECK_GE_OR_RETURN(prediction_desc.shape().NumAxes(), 2)
+      << Error::RuntimeError()
+      << "The dimension of prediction must be greater than or equal to 2, but found "
+      << prediction_desc.shape().NumAxes();
   const int64_t num_out_axes = prediction_desc.shape().NumAxes() - 1;
-  CHECK_EQ_OR_RETURN(label_desc.shape().NumAxes(), num_out_axes);
+  CHECK_EQ_OR_RETURN(label_desc.shape().NumAxes(), num_out_axes)
+      << Error::RuntimeError()
+      << "The dimension of label is expected to be less than that of prediction by 1, but found "
+      << label_desc.shape().NumAxes() << " and " << num_out_axes;
   FOR_RANGE(int64_t, i, 0, num_out_axes) {
-    CHECK_EQ_OR_RETURN(prediction_desc.shape().At(i), label_desc.shape().At(i));
+    CHECK_EQ_OR_RETURN(prediction_desc.shape().At(i), label_desc.shape().At(i))
+        << Error::RuntimeError() << "The size of prediction (" << prediction_desc.shape().At(i)
+        << ") must match the size of label (" << label_desc.shape().At(i) << ") at dimension " << i;
   }
-  *ctx->OutputIsDynamic("prob", 0) = prediction_desc.is_dynamic();
+  ctx->SetOutputIsDynamic("prob", 0, prediction_desc.is_dynamic());
   // 'prob' is just for compute prediction's grad, prob's grad will be ignored
-  *ctx->OutputShape("prob", 0) = prediction_desc.shape();
-  user_op::TensorDesc* out_desc = ctx->OutputTensorDesc("out", 0);
-  *out_desc->mut_is_dynamic() = prediction_desc.is_dynamic();
-  *out_desc->mut_shape() = label_desc.shape();
+  ctx->SetOutputShape("prob", 0, prediction_desc.shape());
+  user_op::TensorDesc* out_desc = ctx->MutOutputTensorDesc("out", 0);
+  out_desc->set_is_dynamic(prediction_desc.is_dynamic());
+  out_desc->set_shape(label_desc.shape());
   return Maybe<void>::Ok();
 }
 
@@ -42,34 +54,53 @@ Maybe<void> InferGradTensorDescFn(user_op::InferContext* ctx) {
   const user_op::TensorDesc& prob_desc = ctx->InputTensorDesc("prob", 0);
   const user_op::TensorDesc& label_desc = ctx->InputTensorDesc("label", 0);
   const user_op::TensorDesc& dy_desc = ctx->InputTensorDesc("dy", 0);
-  CHECK_EQ_OR_RETURN(prob_desc.is_dynamic(), label_desc.is_dynamic());
-  CHECK_GE_OR_RETURN(prob_desc.shape().NumAxes(), 2);
+  CHECK_EQ_OR_RETURN(prob_desc.is_dynamic(), label_desc.is_dynamic())
+      << Error::RuntimeError()
+      << "prob and label are expected to have the same dynamic property, but found "
+      << prob_desc.is_dynamic() << " and " << label_desc.is_dynamic();
+  CHECK_GE_OR_RETURN(prob_desc.shape().NumAxes(), 2)
+      << Error::RuntimeError()
+      << "The dimension of prob must be greater than or equal to 2, but found "
+      << prob_desc.shape().NumAxes();
   const int64_t num_out_axes = prob_desc.shape().NumAxes() - 1;
-  CHECK_EQ_OR_RETURN(label_desc.shape().NumAxes(), num_out_axes);
+  CHECK_EQ_OR_RETURN(label_desc.shape().NumAxes(), num_out_axes)
+      << Error::RuntimeError()
+      << "The dimension of label is expected to be less than that of prediction by 1, but found "
+      << label_desc.shape().NumAxes() << " and " << num_out_axes;
   FOR_RANGE(int64_t, i, 0, num_out_axes) {
-    CHECK_EQ_OR_RETURN(prob_desc.shape().At(i), label_desc.shape().At(i));
+    CHECK_EQ_OR_RETURN(prob_desc.shape().At(i), label_desc.shape().At(i))
+        << Error::RuntimeError() << "The size of prob (" << prob_desc.shape().At(i)
+        << ") must match the size of label (" << label_desc.shape().At(i) << ") at dimension " << i;
   }
-  CHECK_EQ_OR_RETURN(dy_desc.shape(), label_desc.shape());
-  *ctx->OutputShape("prediction_diff", 0) = prob_desc.shape();
-  *ctx->OutputIsDynamic("prediction_diff", 0) = prob_desc.is_dynamic();
+  CHECK_EQ_OR_RETURN(dy_desc.shape(), label_desc.shape())
+      << Error::RuntimeError() << "The size of dy " << dy_desc.shape()
+      << " must match the size of label " << label_desc.shape();
+  ctx->SetOutputShape("prediction_diff", 0, prob_desc.shape());
+  ctx->SetOutputIsDynamic("prediction_diff", 0, prob_desc.is_dynamic());
   return Maybe<void>::Ok();
 }
 
 Maybe<void> InferDataType(user_op::InferContext* ctx) {
   const user_op::TensorDesc& label_desc = ctx->InputTensorDesc("label", 0);
-  CHECK_OR_RETURN(IsIndexDataType(label_desc.data_type()));
-  *ctx->OutputDType("prob", 0) = ctx->InputDType("prediction", 0);
-  *ctx->OutputDType("out", 0) = ctx->InputDType("prediction", 0);
+  CHECK_OR_RETURN(IsIndexDataType(label_desc.data_type()))
+      << Error::TypeError() << "The dtype of label must be integer, but found "
+      << DataType_Name(label_desc.data_type());
+  ctx->SetOutputDType("prob", 0, ctx->InputDType("prediction", 0));
+  ctx->SetOutputDType("out", 0, ctx->InputDType("prediction", 0));
   return Maybe<void>::Ok();
 }
 
 Maybe<void> InferDataTypeGrad(user_op::InferContext* ctx) {
   const user_op::TensorDesc& prob_desc = ctx->InputTensorDesc("prob", 0);
   const user_op::TensorDesc& label_desc = ctx->InputTensorDesc("label", 0);
-  CHECK_OR_RETURN(IsIndexDataType(label_desc.data_type()));
+  CHECK_OR_RETURN(IsIndexDataType(label_desc.data_type()))
+      << Error::TypeError() << "The dtype of label must be integer, but found "
+      << DataType_Name(label_desc.data_type());
   const user_op::TensorDesc& dy_desc = ctx->InputTensorDesc("dy", 0);
-  CHECK_EQ_OR_RETURN(dy_desc.data_type(), prob_desc.data_type());
-  *ctx->OutputDType("prediction_diff", 0) = prob_desc.data_type();
+  CHECK_EQ_OR_RETURN(dy_desc.data_type(), prob_desc.data_type())
+      << Error::TypeError() << "dy and prob are expected to have the same dtype, but found "
+      << DataType_Name(dy_desc.data_type()) << " and " << DataType_Name(prob_desc.data_type());
+  ctx->SetOutputDType("prediction_diff", 0, prob_desc.data_type());
   return Maybe<void>::Ok();
 }
 
@@ -134,74 +165,48 @@ Maybe<void> GetSbpFn(user_op::SbpContext* ctx) {
   return Maybe<void>::Ok();
 }
 
-Maybe<void> GenBackwardOpConf4SparseSoftmaxCrossEntropy(const std::string& op_type_name,
-                                                        const user_op::UserOpWrapper& op,
-                                                        user_op::AddOpFn AddOp) {
-  if (op.NeedGenGradTensor4OpInput("prediction", 0)) {
-    user_op::UserOpConfWrapperBuilder builder(op.op_name() + "_grad");
-    user_op::UserOpConfWrapper grad_op = builder.Op(op_type_name)
-                                             .Input("prob", op.output("prob", 0))
-                                             .Input("label", op.input("label", 0))
-                                             .Input("dy", op.GetGradTensorWithOpOutput("out", 0))
-                                             .Output("prediction_diff")
-                                             .Attr("depth", op.attr<int64_t>("depth"))
-                                             .Build();
-    op.BindGradTensorWithOpInput(grad_op.output("prediction_diff", 0), "prediction", 0);
-    AddOp(grad_op);
-  }
-  return Maybe<void>::Ok();
-}
-
 }  // namespace
 
-#define REGISTER_SPAESE_SOFTMAX_CROSS_ENTROPY_USER_OP(op_name, sbp_sig)                \
-  REGISTER_USER_OP(op_name)                                                            \
-      .Input("prediction")                                                             \
-      .Input("label")                                                                  \
-      .Output("prob")                                                                  \
-      .Output("out")                                                                   \
-      .Attr<int64_t>("depth")                                                          \
-      .SetTensorDescInferFn(InferTensorDescFn)                                         \
-      .SetInputArgModifyFn([](user_op::GetInputArgModifier GetInputArgModifierFn,      \
-                              const user_op::UserOpConfWrapper&) -> Maybe<void> {      \
-        user_op::InputArgModifier* label_modifier = GetInputArgModifierFn("label", 0); \
-        CHECK_OR_RETURN(label_modifier != nullptr);                                    \
-        label_modifier->set_requires_grad(false);                                      \
-        return Maybe<void>::Ok();                                                      \
-      })                                                                               \
-      .SetGetSbpFn(GetSbpFn<sbp_sig>)                                                  \
-      .SetDataTypeInferFn(InferDataType);
+#define IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_OP_FUNCS(op_name, sbp_sig)                       \
+  /*static*/ Maybe<void> op_name##Op::GetSbp(user_op::SbpContext* ctx) { return sbp_sig(ctx); } \
+  /*static*/ Maybe<void> op_name##Op::InferLogicalTensorDesc(user_op::InferContext* ctx) {      \
+    return InferTensorDescFn(ctx);                                                              \
+  }                                                                                             \
+  /*static*/ Maybe<void> op_name##Op::InferPhysicalTensorDesc(user_op::InferContext* ctx) {     \
+    return InferLogicalTensorDesc(ctx);                                                         \
+  }                                                                                             \
+  /*static*/ Maybe<void> op_name##Op::InferDataType(user_op::InferContext* ctx) {               \
+    return oneflow::InferDataType(ctx);                                                         \
+  }                                                                                             \
+  /*static*/ Maybe<void> op_name##Op::ModifyInputArg(                                           \
+      const GetInputArgModifier& GetInputArgModifierFn, const user_op::UserOpConfWrapper&) {    \
+    user_op::InputArgModifier* label_modifier = GetInputArgModifierFn("label", 0);              \
+    CHECK_OR_RETURN(label_modifier != nullptr); /* NOLINT(maybe-need-error-msg) */              \
+    label_modifier->set_requires_grad(false);                                                   \
+    return Maybe<void>::Ok();                                                                   \
+  }
 
-#define REGISTER_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_USER_OP(op_name, sbp_sig) \
-  REGISTER_USER_OP(op_name)                                                  \
-      .Input("label")                                                        \
-      .Input("dy")                                                           \
-      .Input("prob")                                                         \
-      .Output("prediction_diff")                                             \
-      .Attr<int64_t>("depth")                                                \
-      .SetTensorDescInferFn(InferGradTensorDescFn)                           \
-      .SetGetSbpFn(GetSbpFn<sbp_sig>)                                        \
-      .SetDataTypeInferFn(InferDataTypeGrad);
+IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_OP_FUNCS(SparseSoftmaxCrossEntropy, AddSignature);
+IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_OP_FUNCS(SparseSoftmaxCrossEntropyMs, AddMsSignature);
+#undef IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_OP_FUNCS
 
-REGISTER_SPAESE_SOFTMAX_CROSS_ENTROPY_USER_OP("sparse_softmax_cross_entropy", AddSignature);
-REGISTER_SPAESE_SOFTMAX_CROSS_ENTROPY_USER_OP("sparse_softmax_cross_entropy_ms", AddMsSignature);
-REGISTER_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_USER_OP("sparse_softmax_cross_entropy_grad",
-                                                   AddGradSignature);
-REGISTER_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_USER_OP("sparse_softmax_cross_entropy_ms_grad",
-                                                   AddGradMsSignature);
+#define IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_OP_FUNCS(op_name, sbp_sig)                  \
+  /*static*/ Maybe<void> op_name##GradOp::GetSbp(user_op::SbpContext* ctx) {                    \
+    return sbp_sig(ctx);                                                                        \
+  }                                                                                             \
+  /*static*/ Maybe<void> op_name##GradOp::InferLogicalTensorDesc(user_op::InferContext* ctx) {  \
+    return InferGradTensorDescFn(ctx);                                                          \
+  }                                                                                             \
+  /*static*/ Maybe<void> op_name##GradOp::InferPhysicalTensorDesc(user_op::InferContext* ctx) { \
+    return InferLogicalTensorDesc(ctx);                                                         \
+  }                                                                                             \
+  /*static*/ Maybe<void> op_name##GradOp::InferDataType(user_op::InferContext* ctx) {           \
+    return InferDataTypeGrad(ctx);                                                              \
+  }
 
-REGISTER_USER_OP_GRAD("sparse_softmax_cross_entropy")
-    .SetGenBackwardOpConfFn([](const user_op::UserOpWrapper& op,
-                               user_op::AddOpFn AddOp) -> Maybe<void> {
-      return GenBackwardOpConf4SparseSoftmaxCrossEntropy("sparse_softmax_cross_entropy_grad", op,
-                                                         AddOp);
-    });
-
-REGISTER_USER_OP_GRAD("sparse_softmax_cross_entropy_ms")
-    .SetGenBackwardOpConfFn([](const user_op::UserOpWrapper& op,
-                               user_op::AddOpFn AddOp) -> Maybe<void> {
-      return GenBackwardOpConf4SparseSoftmaxCrossEntropy("sparse_softmax_cross_entropy_ms_grad", op,
-                                                         AddOp);
-    });
+IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_OP_FUNCS(SparseSoftmaxCrossEntropy, AddGradSignature);
+IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_OP_FUNCS(SparseSoftmaxCrossEntropyMs,
+                                                     AddGradMsSignature);
+#undef IMPLEMENT_SPAESE_SOFTMAX_CROSS_ENTROPY_GRAD_OP_FUNCS
 
 }  // namespace oneflow

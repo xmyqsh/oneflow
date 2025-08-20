@@ -15,12 +15,11 @@ limitations under the License.
 */
 #include "oneflow/core/kernel/kernel.h"
 #include "oneflow/core/common/buffer_manager.h"
-#include "oneflow/core/job/job_instance.h"
+#include "oneflow/core/job/critical_section_instance.h"
 #include "oneflow/core/job/global_for.h"
 
 namespace oneflow {
 
-template<DeviceType device_type>
 class ReturnKernel final : public Kernel {
  public:
   OF_DISALLOW_COPY_AND_MOVE(ReturnKernel);
@@ -28,40 +27,28 @@ class ReturnKernel final : public Kernel {
   ~ReturnKernel() = default;
 
  private:
-  void ForwardDataContent(const KernelContext* ctx) const override;
-  void ForwardHeader(const KernelContext* ctx) const override;
+  void ForwardDataContent(KernelContext* ctx) const override;
+  void ForwardHeader(KernelContext* ctx) const override;
 };
 
-template<DeviceType device_type>
-void ReturnKernel<device_type>::ForwardDataContent(const KernelContext* ctx) const {
-  if (CHECK_JUST(*Global<Maybe<bool>, MultiClient>::Get())) {
-    CHECK(this->op_conf().return_conf().has_job_name());
-    const auto& job_name = this->op_conf().return_conf().job_name();
-    const auto& op_name = this->op_conf().name();
-    auto* buffer_mgr = Global<BufferMgr<std::shared_ptr<JobInstance>>>::Get();
-    auto* buffer = buffer_mgr->Get(GetOutputBufferName(job_name, op_name));
-    std::shared_ptr<JobInstance> job_instance;
-    BufferStatus buffer_status = buffer->TryReceive(&job_instance);
-    CHECK_NE(buffer_status, kBufferStatusEmpty);
-    if (buffer_status == kBufferStatusSuccess) {
-      OfBlob ofblob(ctx->device_ctx(), ctx->BnInOp2Blob("in"));
-      job_instance->PullBlobByOpName(reinterpret_cast<uint64_t>(&ofblob), op_name);
-    }
-  } else {
-    ctx->BnInOp2Blob("out")->CopyDataContentFrom(ctx->device_ctx(), ctx->BnInOp2Blob("in"));
-    ctx->device_ctx()->SyncDevice();
+void ReturnKernel::ForwardDataContent(KernelContext* ctx) const {
+  CHECK(this->op_conf().return_conf().has_job_name());
+  const auto& job_name = this->op_conf().return_conf().job_name();
+  const auto& op_name = this->op_conf().name();
+  auto* buffer_mgr = Singleton<BufferMgr<std::shared_ptr<CriticalSectionInstance>>>::Get();
+  auto* buffer = buffer_mgr->Get(GetOutputBufferName(job_name, op_name));
+  std::shared_ptr<CriticalSectionInstance> critical_section_instance;
+  BufferStatus buffer_status = buffer->TryReceive(&critical_section_instance);
+  CHECK_NE(buffer_status, kBufferStatusEmpty);
+  if (buffer_status == kBufferStatusSuccess) {
+    critical_section_instance->AccessBlobByOpName(ctx->stream(), ctx->BnInOp2Blob("in"), op_name);
   }
 }
 
-template<DeviceType device_type>
-void ReturnKernel<device_type>::ForwardHeader(const KernelContext* ctx) const {
-  if (CHECK_JUST(*Global<Maybe<bool>, MultiClient>::Get())) {
-    // Do nothing.
-  } else {
-    ctx->BnInOp2Blob("out")->CopyHeaderFrom(ctx->device_ctx(), ctx->BnInOp2Blob("in"));
-  }
+void ReturnKernel::ForwardHeader(KernelContext* ctx) const {
+  // Do nothing.
 }
 
-ADD_DEVICE_TYPE_KERNEL_CREATOR(OperatorConf::kReturnConf, ReturnKernel);
+REGISTER_KERNEL(OperatorConf::kReturnConf, ReturnKernel);
 
 }  // namespace oneflow

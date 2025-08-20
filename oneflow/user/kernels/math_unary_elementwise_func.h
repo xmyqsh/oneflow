@@ -19,6 +19,7 @@ limitations under the License.
 #include "oneflow/core/common/util.h"
 #include "oneflow/core/common/data_type.h"
 #include "oneflow/user/ops/math_unary_elementwise_seq.h"
+#include "oneflow/core/device/cuda_pseudo_half.h"
 
 #if defined(__CUDACC__)
 
@@ -153,6 +154,13 @@ struct AtanhFunctor<float> {
 };
 
 template<>
+struct NotEqualZeroFunctor<float> {
+  static OF_DEVICE_FUNC float Forward(const float x) { return x != 0; }
+
+  static OF_DEVICE_FUNC float Backward(const float x, const float dy) { return 0.0f; }
+};
+
+template<>
 struct CeilFunctor<float> {
   static OF_DEVICE_FUNC float Forward(const float x) { return MATH_FUNC_F(ceil, x); }
 
@@ -236,6 +244,15 @@ struct LogFunctor<float> {
   static OF_DEVICE_FUNC float Forward(const float x) { return MATH_FUNC_F(log, x); }
 
   static OF_DEVICE_FUNC float Backward(const float x, const float dy) { return dy * (1.0f / x); }
+};
+
+template<>
+struct Log2Functor<float> {
+  static OF_DEVICE_FUNC float Forward(const float x) { return MATH_FUNC_F(log2, x); }
+
+  static OF_DEVICE_FUNC float Backward(const float x, const float dy) {
+    return dy * (1.0f / (x * MATH_FUNC_F(log, 2.0f)));
+  }
 };
 
 template<>
@@ -332,17 +349,6 @@ struct SinhFunctor<float> {
 };
 
 template<>
-struct SoftplusFunctor<float> {
-  static OF_DEVICE_FUNC float Forward(const float x) {
-    return MATH_FUNC_F(log, (1.0f + MATH_FUNC_F(exp, x)));
-  }
-
-  static OF_DEVICE_FUNC float Backward(const float x, const float dy) {
-    return dy * MATH_FUNC_F(exp, x) / (MATH_FUNC_F(exp, x) + 1.0f);
-  }
-};
-
-template<>
 struct SqrtFunctor<float> {
   static OF_DEVICE_FUNC float Forward(const float x) { return MATH_FUNC_F(sqrt, x); }
 
@@ -364,15 +370,6 @@ struct TanFunctor<float> {
 
   static OF_DEVICE_FUNC float Backward(const float x, const float dy) {
     return dy * (1.0f / (MATH_FUNC_F(cos, x) * MATH_FUNC_F(cos, x)));
-  }
-};
-
-template<>
-struct TanhFunctor<float> {
-  static OF_DEVICE_FUNC float Forward(const float x) { return MATH_FUNC_F(tanh, x); }
-
-  static OF_DEVICE_FUNC float Backward(const float x, const float dy) {
-    return dy * (1.0f - MATH_FUNC_F(tanh, x) * MATH_FUNC_F(tanh, x));
   }
 };
 
@@ -430,6 +427,13 @@ struct AtanhFunctor<double> {
   static OF_DEVICE_FUNC double Backward(const double x, const double dy) {
     return dy * (1.0 / (1.0 - x * x));
   }
+};
+
+template<>
+struct NotEqualZeroFunctor<double> {
+  static OF_DEVICE_FUNC double Forward(const double x) { return x != 0; }
+
+  static OF_DEVICE_FUNC double Backward(const double x, const double dy) { return 0.0f; }
 };
 
 template<>
@@ -516,6 +520,15 @@ struct LogFunctor<double> {
   static OF_DEVICE_FUNC double Forward(const double x) { return MATH_FUNC_D(log, x); }
 
   static OF_DEVICE_FUNC double Backward(const double x, const double dy) { return dy * (1.0 / x); }
+};
+
+template<>
+struct Log2Functor<double> {
+  static OF_DEVICE_FUNC double Forward(const double x) { return MATH_FUNC_D(log2, x); }
+
+  static OF_DEVICE_FUNC double Backward(const double x, const double dy) {
+    return dy * (1.0 / (x * MATH_FUNC_D(log, 2.0)));
+  }
 };
 
 template<>
@@ -612,22 +625,11 @@ struct SinhFunctor<double> {
 };
 
 template<>
-struct SoftplusFunctor<double> {
-  static OF_DEVICE_FUNC double Forward(const double x) {
-    return MATH_FUNC_D(log, (1.0 + MATH_FUNC_D(exp, x)));
-  }
-
-  static OF_DEVICE_FUNC double Backward(const double x, const double dy) {
-    return dy * MATH_FUNC_D(exp, x) / (MATH_FUNC_D(exp, x) + 1.0);
-  }
-};
-
-template<>
 struct SqrtFunctor<double> {
   static OF_DEVICE_FUNC double Forward(const double x) { return MATH_FUNC_D(sqrt, x); }
 
   static OF_DEVICE_FUNC double Backward(const double x, const double dy) {
-    return dy * 0.5 / MATH_FUNC_D(sqrt, x);
+    return dy * (double)0.5 / MATH_FUNC_D(sqrt, x);
   }
 };
 
@@ -644,15 +646,6 @@ struct TanFunctor<double> {
 
   static OF_DEVICE_FUNC double Backward(const double x, const double dy) {
     return dy * (1.0 / (MATH_FUNC_D(cos, x) * MATH_FUNC_D(cos, x)));
-  }
-};
-
-template<>
-struct TanhFunctor<double> {
-  static OF_DEVICE_FUNC double Forward(const double x) { return MATH_FUNC_D(tanh, x); }
-
-  static OF_DEVICE_FUNC double Backward(const double x, const double dy) {
-    return dy * (1.0 - MATH_FUNC_D(tanh, x) * MATH_FUNC_D(tanh, x));
   }
 };
 
@@ -739,6 +732,13 @@ struct CeilFunctor<half> {
 };
 
 template<>
+struct NotEqualZeroFunctor<half> {
+  static OF_HALF_FUNC half Forward(const half x) { return x != static_cast<half>(0.0); }
+
+  static OF_HALF_FUNC half Backward(const half x, const half dy) { return GetZeroVal<half>(); }
+};
+
+template<>
 struct CosFunctor<half> {
   static OF_HALF_FUNC half Forward(const half x) { return hcos(x); }
 
@@ -811,6 +811,15 @@ struct LogFunctor<half> {
   static OF_HALF_FUNC half Forward(const half x) { return hlog(x); }
 
   static OF_HALF_FUNC half Backward(const half x, const half dy) { return __hmul(dy, hrcp(x)); }
+};
+
+template<>
+struct Log2Functor<half> {
+  static OF_HALF_FUNC half Forward(const half x) { return hlog2(x); }
+
+  static OF_HALF_FUNC half Backward(const half x, const half dy) {
+    return __hmul(dy, hrcp(__hmul(x, hlog(HALF_VAL_TWO))));
+  }
 };
 
 template<>
@@ -925,17 +934,6 @@ struct SinhFunctor<half> {
 };
 
 template<>
-struct SoftplusFunctor<half> {
-  static OF_HALF_FUNC half Forward(const half x) {
-    return hlog(__hadd(GetOneVal<half>(), hexp(x)));
-  }
-
-  static OF_HALF_FUNC half Backward(const half x, const half dy) {
-    return __hmul(dy, __hdiv(hexp(x), __hadd(hexp(x), GetOneVal<half>())));
-  }
-};
-
-template<>
 struct SqrtFunctor<half> {
   static OF_HALF_FUNC half Forward(const half x) { return hsqrt(x); }
 
@@ -959,16 +957,6 @@ struct TanFunctor<half> {
 
   static OF_HALF_FUNC half Backward(const half x, const half dy) {
     return __hmul(dy, hrcp(__hmul(hcos(x), hcos(x))));
-  }
-};
-
-template<>
-struct TanhFunctor<half> {
-  static OF_HALF_FUNC half Forward(const half x) { return MATH_FUNC_H(tanh, x); }
-
-  static OF_HALF_FUNC half Backward(const half x, const half dy) {
-    float x_float = __half2float(x);
-    return __hmul(dy, __float2half(1.0 - tanhf(x_float) * tanhf(x_float)));
   }
 };
 

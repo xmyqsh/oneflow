@@ -18,8 +18,9 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from automated_test_util import *
-from test_util import GenArgList
+
+from oneflow.test_utils.automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
@@ -48,7 +49,8 @@ def _test_flatten(test_case, device):
 
 def _test_flatten_backward(test_case, device):
     m = flow.nn.Flatten().to(flow.device(device))
-    x = flow.Tensor(2, 3, 4, 5, device=flow.device(device), requires_grad=True)
+    x = flow.Tensor(2, 3, 4, 5, device=flow.device(device))
+    x.requires_grad = True
     flow.nn.init.uniform_(x)
     y = m(x)
     z = y.sum()
@@ -65,27 +67,54 @@ class TestFlattenModule(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             arg[0](test_case, *arg[1:])
 
-    @autotest(auto_backward=False)
-    def test_against_pytorch(test_case):
+    @autotest(n=5)
+    def test_flatten_module_with_random_data(test_case):
         m = torch.nn.Flatten(
             start_dim=random(1, 6) | nothing(), end_dim=random(1, 6) | nothing()
         )
         m.train(random())
         device = random_device()
         m.to(device)
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = m(x)
         return y
 
-    @autotest(auto_backward=False)
-    def test_tensor_against_pytorch(test_case):
+    @autotest(n=5)
+    def test_flatten_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor().to(device)
-        y = x.flatten(
+        x = random_tensor().to(device)
+        y = torch.flatten(
+            x,
             start_dim=random(1, 6).to(int) | nothing(),
             end_dim=random(1, 6).to(int) | nothing(),
         )
         return y
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_flatten_bool_with_random_data(test_case):
+        device = random_device()
+        x = random_tensor().to(device=device, dtype=torch.bool)
+        y = torch.flatten(
+            x,
+            start_dim=random(1, 6).to(int) | nothing(),
+            end_dim=random(1, 6).to(int) | nothing(),
+        )
+        return y
+
+    @autotest(n=5)
+    def test_flatten_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = torch.flatten(
+            x,
+            start_dim=random(1, 6).to(int) | nothing(),
+            end_dim=random(1, 6).to(int) | nothing(),
+        )
+        return y
+
+    @profile(torch.flatten)
+    def profile_flatten(test_case):
+        torch.flatten(torch.ones(1000, 1000))
 
 
 if __name__ == "__main__":

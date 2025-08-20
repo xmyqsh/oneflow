@@ -27,7 +27,7 @@ def _of_image_normalize(images, image_static_shape, std, mean):
     image_zeros = np.zeros(tuple(image_static_shape))
     for (idx, image) in enumerate(images):
         image_zeros[idx, : image.shape[1], : image.shape[2], : image.shape[3]] = image
-    image_tensors = flow.Tensor(
+    image_tensors = flow.tensor(
         image_zeros, dtype=flow.float, device=flow.device("cpu")
     )
     image_tensor_buffer = flow.tensor_to_tensor_buffer(image_tensors, instance_dims=3)
@@ -76,8 +76,8 @@ class TestImageNormalize(flow.unittest.TestCase):
         _compare_image_normalize(
             test_case,
             [
-                "/dataset/mscoco_2017/val2017/000000000139.jpg",
-                "/dataset/mscoco_2017/val2017/000000000632.jpg",
+                flow.unittest.dataset_dir("mscoco_2017/val2017/000000000139.jpg"),
+                flow.unittest.dataset_dir("mscoco_2017/val2017/000000000632.jpg"),
             ],
             (102.9801, 115.9465, 122.7717),
             (1.0, 1.0, 1.0),

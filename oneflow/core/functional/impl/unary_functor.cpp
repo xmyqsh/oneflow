@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "oneflow/core/functional/impl/unary_functor.h"
+#include "oneflow/core/functional/impl/binary_functor.h"
 
 #include "oneflow/core/framework/op_builder.h"
 #include "oneflow/core/functional/function_library.h"
@@ -25,42 +26,61 @@ namespace one {
 namespace functional {
 
 namespace impl {
-#define INPLACEABLE_UNARY_FUNC_SEQ OF_PP_MAKE_TUPLE_SEQ("sin", Sin)
 
-#define UNARY_FUNC_SEQ                                       \
-  OF_PP_MAKE_TUPLE_SEQ("abs", Abs)                           \
-  OF_PP_MAKE_TUPLE_SEQ("acos", Acos)                         \
-  OF_PP_MAKE_TUPLE_SEQ("acosh", Acosh)                       \
-  OF_PP_MAKE_TUPLE_SEQ("asin", Asin)                         \
-  OF_PP_MAKE_TUPLE_SEQ("asinh", Asinh)                       \
-  OF_PP_MAKE_TUPLE_SEQ("atan", Atan)                         \
-  OF_PP_MAKE_TUPLE_SEQ("atanh", Atanh)                       \
-  OF_PP_MAKE_TUPLE_SEQ("ceil", Ceil)                         \
-  OF_PP_MAKE_TUPLE_SEQ("cos", Cos)                           \
-  OF_PP_MAKE_TUPLE_SEQ("cosh", Cosh)                         \
-  OF_PP_MAKE_TUPLE_SEQ("erf", Erf)                           \
-  OF_PP_MAKE_TUPLE_SEQ("erfc", Erfc)                         \
-  OF_PP_MAKE_TUPLE_SEQ("exp", Exp)                           \
-  OF_PP_MAKE_TUPLE_SEQ("expm1", Expm1)                       \
-  OF_PP_MAKE_TUPLE_SEQ("floor", Floor)                       \
-  OF_PP_MAKE_TUPLE_SEQ("lgamma", Lgamma)                     \
-  OF_PP_MAKE_TUPLE_SEQ("log", Log)                           \
-  OF_PP_MAKE_TUPLE_SEQ("log1p", Log1p)                       \
-  OF_PP_MAKE_TUPLE_SEQ("log_sigmoid", LogSigmoid)            \
-  OF_PP_MAKE_TUPLE_SEQ("negative", Negative)                 \
-  OF_PP_MAKE_TUPLE_SEQ("reciprocal", Reciprocal)             \
-  OF_PP_MAKE_TUPLE_SEQ("reciprocal_no_nan", ReciprocalNoNan) \
-  OF_PP_MAKE_TUPLE_SEQ("rint", Rint)                         \
-  OF_PP_MAKE_TUPLE_SEQ("round", Round)                       \
-  OF_PP_MAKE_TUPLE_SEQ("rsqrt", Rsqrt)                       \
-  OF_PP_MAKE_TUPLE_SEQ("sigmoid_v2", Sigmoid)                \
-  OF_PP_MAKE_TUPLE_SEQ("sign", Sign)                         \
-  OF_PP_MAKE_TUPLE_SEQ("sinh", Sinh)                         \
-  OF_PP_MAKE_TUPLE_SEQ("softplus", Softplus)                 \
-  OF_PP_MAKE_TUPLE_SEQ("sqrt", Sqrt)                         \
-  OF_PP_MAKE_TUPLE_SEQ("square", Square)                     \
-  OF_PP_MAKE_TUPLE_SEQ("tan", Tan)                           \
+#define INPLACE_UNARY_FLOAT_FUNC_SEQ          \
+  OF_PP_MAKE_TUPLE_SEQ("sin", InplaceSin)     \
+  OF_PP_MAKE_TUPLE_SEQ("floor", InplaceFloor) \
+  OF_PP_MAKE_TUPLE_SEQ("ceil", InplaceCeil)   \
+  OF_PP_MAKE_TUPLE_SEQ("round", InplaceRound)
+
+#define UNARY_PRIMITIVE_FUNC_BWD_WITH_DY_X_SEQ    \
+  OF_PP_MAKE_TUPLE_SEQ("abs", Abs)                \
+  OF_PP_MAKE_TUPLE_SEQ("acos", Acos)              \
+  OF_PP_MAKE_TUPLE_SEQ("cosh", Cosh)              \
+  OF_PP_MAKE_TUPLE_SEQ("lgamma", Lgamma)          \
+  OF_PP_MAKE_TUPLE_SEQ("log_sigmoid", LogSigmoid) \
+  OF_PP_MAKE_TUPLE_SEQ("reciprocal_no_nan", ReciprocalNoNan)
+
+#define FLOAT_UNARY_PRIMITIVE_FUNC_BWD_WITH_DY_X_SEQ \
+  OF_PP_MAKE_TUPLE_SEQ("acosh", Acosh)               \
+  OF_PP_MAKE_TUPLE_SEQ("asin", Asin)                 \
+  OF_PP_MAKE_TUPLE_SEQ("asinh", Asinh)               \
+  OF_PP_MAKE_TUPLE_SEQ("atan", Atan)                 \
+  OF_PP_MAKE_TUPLE_SEQ("atanh", Atanh)               \
+  OF_PP_MAKE_TUPLE_SEQ("sin", Sin)                   \
+  OF_PP_MAKE_TUPLE_SEQ("cos", Cos)                   \
+  OF_PP_MAKE_TUPLE_SEQ("erf", Erf)                   \
+  OF_PP_MAKE_TUPLE_SEQ("erfc", Erfc)                 \
+  OF_PP_MAKE_TUPLE_SEQ("exp", Exp)                   \
+  OF_PP_MAKE_TUPLE_SEQ("exp2", Exp2)                 \
+  OF_PP_MAKE_TUPLE_SEQ("expm1", Expm1)               \
+  OF_PP_MAKE_TUPLE_SEQ("log", Log)                   \
+  OF_PP_MAKE_TUPLE_SEQ("log2", Log2)                 \
+  OF_PP_MAKE_TUPLE_SEQ("log10", Log10)               \
+  OF_PP_MAKE_TUPLE_SEQ("log1p", Log1p)               \
+  OF_PP_MAKE_TUPLE_SEQ("reciprocal", Reciprocal)     \
+  OF_PP_MAKE_TUPLE_SEQ("rsqrt", Rsqrt)               \
+  OF_PP_MAKE_TUPLE_SEQ("sinh", Sinh)                 \
+  OF_PP_MAKE_TUPLE_SEQ("sqrt", Sqrt)                 \
+  OF_PP_MAKE_TUPLE_SEQ("square", Square)             \
+  OF_PP_MAKE_TUPLE_SEQ("tan", Tan)                   \
+  OF_PP_MAKE_TUPLE_SEQ("digamma", Digamma)
+
+#define FLOAT_UNARY_PRIMITIVE_FUNC_BWD_WITH_DY_Y_SEQ \
+  OF_PP_MAKE_TUPLE_SEQ("sigmoid", Sigmoid)           \
   OF_PP_MAKE_TUPLE_SEQ("tanh", Tanh)
+
+#define UNARY_FUNC_BWD_WITH_FILL_SEQ   \
+  OF_PP_MAKE_TUPLE_SEQ("rint", Rint)   \
+  OF_PP_MAKE_TUPLE_SEQ("round", Round) \
+  OF_PP_MAKE_TUPLE_SEQ("floor", Floor) \
+  OF_PP_MAKE_TUPLE_SEQ("ceil", Ceil)
+
+#define FLOAT_UNARY_FUNC_BWD_WITH_FILL_SEQ \
+  OF_PP_MAKE_TUPLE_SEQ("sign", Sign)       \
+  OF_PP_MAKE_TUPLE_SEQ("not_equal_zero", NotEqualZero)
+
+#define LOGICAL_FLOAT_UNARY_FUNC_SEQ OF_PP_MAKE_TUPLE_SEQ("logical_not", LogicalNot)
 
 #define UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, base)                    \
   class class_name##Functor : public base {                                          \
@@ -70,54 +90,137 @@ namespace impl {
     }                                                                                \
   };
 
-#define INPLACEABLE_UNARY_FUNCOTRS(op_type_name, class_name) \
-  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, InplaceableUnaryFunctor)
-#define UNARY_FUNCOTRS(op_type_name, class_name) \
-  UNARY_ELEMENTWISE_FUNCTOR(                     \
-      op_type_name, class_name,                  \
-      UnaryFunctor)  // TODO(yaochi): replace UNARY_FUNC_SEQ with INPLACEABLE_UNARY_FUNC_SEQ SEQ
+#define UNARY_ELEMENTWISE_BWD_WITH_DY_X_FUNCTOR(op_type_name, class_name, base) \
+  class class_name##WithDyXGradFunctor : public base {                          \
+   public:                                                                      \
+    class_name##WithDyXGradFunctor() {                                          \
+      op_ = CHECK_JUST(one::OpBuilder(std::string("") + op_type_name + "_grad") \
+                           .Input("x")                                          \
+                           .Input("dy")                                         \
+                           .Output("dx")                                        \
+                           .Build());                                           \
+    }                                                                           \
+  };
 
-OF_PP_FOR_EACH_TUPLE(INPLACEABLE_UNARY_FUNCOTRS, INPLACEABLE_UNARY_FUNC_SEQ);
-OF_PP_FOR_EACH_TUPLE(UNARY_FUNCOTRS, UNARY_FUNC_SEQ);
+#define UNARY_ELEMENTWISE_BWD_WITH_DY_Y_FUNCTOR(op_type_name, class_name, base) \
+  class class_name##WithDyYGradFunctor : public base {                          \
+   public:                                                                      \
+    class_name##WithDyYGradFunctor() {                                          \
+      op_ = CHECK_JUST(one::OpBuilder(std::string("") + op_type_name + "_grad") \
+                           .Input("y")                                          \
+                           .Input("dy")                                         \
+                           .Output("dx")                                        \
+                           .Build());                                           \
+    }                                                                           \
+  };
+
+#define INPLACE_UNARY_FUNCTORS(op_type_name, class_name) \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, InplaceUnaryFunctor)
+#define INPLACE_FLOAT_UNARY_FUNCTORS(op_type_name, class_name) \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, InplaceFloatUnaryFunctor)
+#define LOGICAL_FLOAT_UNARY_FUNCTORS(op_type_name, class_name) \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, FloatUnaryFunctor)
+#define UNARY_FUNCTORS(op_type_name, class_name)                    \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, UnaryFunctor) \
+  UNARY_ELEMENTWISE_BWD_WITH_DY_X_FUNCTOR(op_type_name, class_name, BinaryFunctor)
+#define FLOAT_UNARY_FUNCTORS(op_type_name, class_name)                   \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, FloatUnaryFunctor) \
+  UNARY_ELEMENTWISE_BWD_WITH_DY_X_FUNCTOR(op_type_name, class_name, BinaryFunctor)
+
+#define UNARY_BWD_WITH_DY_X_FUNCTORS(op_type_name, class_name)      \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, UnaryFunctor) \
+  UNARY_ELEMENTWISE_BWD_WITH_DY_X_FUNCTOR(op_type_name, class_name, BinaryFunctor)
+
+#define FLOAT_UNARY_BWD_WITH_DY_X_FUNCTORS(op_type_name, class_name)     \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, FloatUnaryFunctor) \
+  UNARY_ELEMENTWISE_BWD_WITH_DY_X_FUNCTOR(op_type_name, class_name, BinaryFunctor)
+
+#define FLOAT_UNARY_WITH_DY_Y_FUNCTORS(op_type_name, class_name)         \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, FloatUnaryFunctor) \
+  UNARY_ELEMENTWISE_BWD_WITH_DY_Y_FUNCTOR(op_type_name, class_name, BinaryFunctor)
+
+#define FLOAT_UNARY_BWD_WITH_FILL_FUNCTORS(op_type_name, class_name) \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, FloatUnaryFunctor)
+
+#define UNARY_BWD_WITH_FILL_FUNCTORS(op_type_name, class_name) \
+  UNARY_ELEMENTWISE_FUNCTOR(op_type_name, class_name, UnaryFunctor)
+
+OF_PP_FOR_EACH_TUPLE(INPLACE_FLOAT_UNARY_FUNCTORS, INPLACE_UNARY_FLOAT_FUNC_SEQ);
+OF_PP_FOR_EACH_TUPLE(LOGICAL_FLOAT_UNARY_FUNCTORS, LOGICAL_FLOAT_UNARY_FUNC_SEQ);
+
+OF_PP_FOR_EACH_TUPLE(UNARY_BWD_WITH_DY_X_FUNCTORS, UNARY_PRIMITIVE_FUNC_BWD_WITH_DY_X_SEQ);
+OF_PP_FOR_EACH_TUPLE(FLOAT_UNARY_BWD_WITH_DY_X_FUNCTORS,
+                     FLOAT_UNARY_PRIMITIVE_FUNC_BWD_WITH_DY_X_SEQ);
+
+OF_PP_FOR_EACH_TUPLE(FLOAT_UNARY_WITH_DY_Y_FUNCTORS, FLOAT_UNARY_PRIMITIVE_FUNC_BWD_WITH_DY_Y_SEQ);
+OF_PP_FOR_EACH_TUPLE(UNARY_BWD_WITH_FILL_FUNCTORS, UNARY_FUNC_BWD_WITH_FILL_SEQ);
+OF_PP_FOR_EACH_TUPLE(FLOAT_UNARY_BWD_WITH_FILL_FUNCTORS, FLOAT_UNARY_FUNC_BWD_WITH_FILL_SEQ);
+
+UNARY_ELEMENTWISE_FUNCTOR("negative", Negative, FloatUnaryFunctor)
+UNARY_ELEMENTWISE_FUNCTOR("bitwise_not", BitwiseNot, UnaryFunctor)
+UNARY_ELEMENTWISE_FUNCTOR("trigamma", Trigamma, FloatUnaryFunctor)
 
 }  // namespace impl
 
+using namespace impl;
+#define ADD_UNARY_FUNCTOR_WITH_DY_X(class_name, functor_name) \
+  m.add_functor<class_name##Functor>(functor_name);           \
+  m.add_functor<class_name##WithDyXGradFunctor>(std::string("") + functor_name + "Grad");
+
+#define ADD_UNARY_FUNCTOR_WITH_DY_Y(class_name, functor_name) \
+  m.add_functor<class_name##Functor>(functor_name);           \
+  m.add_functor<class_name##WithDyYGradFunctor>(std::string("") + functor_name + "Grad");
+
 ONEFLOW_FUNCTION_LIBRARY(m) {
-  m.add_functor<impl::AbsFunctor>("Abs");
-  m.add_functor<impl::AcosFunctor>("Acos");
-  m.add_functor<impl::AcoshFunctor>("Acosh");
-  m.add_functor<impl::AsinFunctor>("Asin");
-  m.add_functor<impl::AsinhFunctor>("Asinh");
-  m.add_functor<impl::AtanFunctor>("Atan");
-  m.add_functor<impl::AtanhFunctor>("Atanh");
-  m.add_functor<impl::CeilFunctor>("Ceil");
-  m.add_functor<impl::CosFunctor>("Cos");
-  m.add_functor<impl::CoshFunctor>("Cosh");
-  m.add_functor<impl::ErfFunctor>("Erf");
-  m.add_functor<impl::ErfcFunctor>("Erfc");
-  m.add_functor<impl::ExpFunctor>("Exp");
-  m.add_functor<impl::Expm1Functor>("Expm1");
-  m.add_functor<impl::FloorFunctor>("Floor");
-  m.add_functor<impl::LgammaFunctor>("Lgamma");
-  m.add_functor<impl::LogFunctor>("Log");
-  m.add_functor<impl::Log1pFunctor>("Log1p");
-  m.add_functor<impl::LogSigmoidFunctor>("LogSigmoid");
-  m.add_functor<impl::NegativeFunctor>("Negative");
-  m.add_functor<impl::ReciprocalFunctor>("Reciprocal");
-  m.add_functor<impl::ReciprocalNoNanFunctor>("ReciprocalNoNan");
-  m.add_functor<impl::RintFunctor>("Rint");
-  m.add_functor<impl::RoundFunctor>("Round");
-  m.add_functor<impl::RsqrtFunctor>("Rsqrt");
-  m.add_functor<impl::SigmoidFunctor>("Sigmoid");
-  m.add_functor<impl::SignFunctor>("Sign");
-  m.add_functor<impl::SinFunctor>("Sin");
-  m.add_functor<impl::SinhFunctor>("Sinh");
-  m.add_functor<impl::SoftplusFunctor>("Softplus");
-  m.add_functor<impl::SqrtFunctor>("Sqrt");
-  m.add_functor<impl::SquareFunctor>("Square");
-  m.add_functor<impl::TanFunctor>("Tan");
-  m.add_functor<impl::TanhFunctor>("Tanh");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Abs, "Abs");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Acos, "Acos");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Acosh, "Acosh");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Asin, "Asin");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Asinh, "Asinh");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Atan, "Atan");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Atanh, "Atanh");
+  m.add_functor<CeilFunctor>("Ceil");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Cos, "Cos");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Cosh, "Cosh");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Digamma, "Digamma");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Erf, "Erf");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Erfc, "Erfc");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Exp, "Exp");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Exp2, "Exp2");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Expm1, "Expm1");
+  m.add_functor<FloorFunctor>("Floor");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Lgamma, "Lgamma");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Log, "Log");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Log2, "Log2");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Log10, "Log10");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Log1p, "Log1p");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(LogSigmoid, "LogSigmoid");
+  m.add_functor<NegativeFunctor>("Negative");
+  m.add_functor<BitwiseNotFunctor>("BitwiseNot");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Reciprocal, "Reciprocal");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(ReciprocalNoNan, "ReciprocalNoNan");
+  m.add_functor<RintFunctor>("Rint");
+  m.add_functor<RoundFunctor>("Round");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Rsqrt, "Rsqrt");
+  ADD_UNARY_FUNCTOR_WITH_DY_Y(Sigmoid, "Sigmoid");
+  m.add_functor<SignFunctor>("Sign");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Sin, "Sin");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Sinh, "Sinh");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Sqrt, "Sqrt");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Square, "Square");
+  ADD_UNARY_FUNCTOR_WITH_DY_X(Tan, "Tan");
+  ADD_UNARY_FUNCTOR_WITH_DY_Y(Tanh, "Tanh");
+  m.add_functor<NotEqualZeroFunctor>("NotEqualZero");
+  m.add_functor<LogicalNotFunctor>("LogicalNot");
+  m.add_functor<InplaceSinFunctor>("Sin_");
+  m.add_functor<InplaceFloorFunctor>("Floor_");
+  m.add_functor<InplaceCeilFunctor>("Ceil_");
+  m.add_functor<InplaceRoundFunctor>("Round_");
+  m.add_functor<TrigammaFunctor>("Trigamma");
 };
+
+#undef ADD_UNARY_FUNCTOR_WITH_DY_X
+#undef ADD_UNARY_FUNCTOR_WITH_DY_Y
 
 }  // namespace functional
 }  // namespace one

@@ -71,13 +71,13 @@ Maybe<void> IndexedSlicesOptimizerRewritePass::Apply(const OpGraph& op_graph,
       if (dst_op_conf.has_user_conf()
           && dst_op_conf.user_conf().op_type_name() == "hierarchical_parallel_cast") {
         if (dst_node->out_edges().size() != 1) { return; }
-        op_nodes_to_remove.push_back(dst_node);
+        op_nodes_to_remove.emplace_back(dst_node);
         dst_node = dst_node->SoleOutEdge()->dst_node();
         continue;
       } else if (dst_op_conf.has_user_conf()
                  && dst_op_conf.user_conf().op_type_name() == "scalar_mul") {
         if (dst_node->out_edges().size() != 1) { return; }
-        op_nodes_apply_to_diff.push_back(dst_node);
+        op_nodes_apply_to_diff.emplace_back(dst_node);
         dst_node = dst_node->SoleOutEdge()->dst_node();
         continue;
       } else {
@@ -107,19 +107,26 @@ Maybe<void> IndexedSlicesOptimizerRewritePass::Apply(const OpGraph& op_graph,
     indexed_slices_op_builder.OpTypeName("indexed_slices_" + user_op_conf.op_type_name())
         .Input("model", user_op_conf.input("model", 0))
         .Input("learning_rate", user_op_conf.input("learning_rate", 0))
-        .Attr<float>("weight_decay", user_op_conf.attr<float>("weight_decay"));
+        .Attr<float>("weight_decay", user_op_conf.attr<float>("weight_decay"))
+        .Attr<float>("learning_rate_scale", user_op_conf.attr<float>("learning_rate_scale"));
 
     if (user_op_conf.op_type_name() == "sgd_update") {
       // do nothing
     } else if (user_op_conf.op_type_name() == "momentum_update") {
       indexed_slices_op_builder.Input("momentum", user_op_conf.input("momentum", 0))
-          .Attr<float>("beta", user_op_conf.attr<float>("beta"));
+          .Attr<float>("beta", user_op_conf.attr<float>("beta"))
+          .Attr<float>("dampening", user_op_conf.attr<float>("dampening"))
+          .Attr<bool>("nesterov", user_op_conf.attr<bool>("nesterov"))
+          .Attr<bool>("maximize", user_op_conf.attr<bool>("maximize"));
     } else if (user_op_conf.op_type_name() == "adam_update") {
       indexed_slices_op_builder.Input("m", user_op_conf.input("m", 0))
           .Input("v", user_op_conf.input("v", 0))
           .Attr<float>("beta1", user_op_conf.attr<float>("beta1"))
           .Attr<float>("beta2", user_op_conf.attr<float>("beta2"))
           .Attr<float>("epsilon", user_op_conf.attr<float>("epsilon"));
+      if (user_op_conf.has_input("max_v", 0)) {
+        indexed_slices_op_builder.Input("max_v", user_op_conf.input("max_v", 0));
+      }
     } else {
       return;
     }

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/framework/user_op_kernel_registry.h"
+#include "oneflow/core/framework/user_op_hob.h"
 
 namespace oneflow {
 
@@ -29,11 +30,6 @@ OpKernelRegistry& OpKernelRegistry::SetCreateFn(OpKernelCreateFn fn) {
   return *this;
 }
 
-OpKernelRegistry& OpKernelRegistry::SetIsMatchedHob(IsMatchedHob hob) {
-  result_.is_matched_hob = hob;
-  return *this;
-}
-
 OpKernelRegistry& OpKernelRegistry::SetInferTmpSizeFn(InferTmpSizeFn fn) {
   result_.infer_tmp_size_fn = std::move(fn);
   return *this;
@@ -44,16 +40,24 @@ OpKernelRegistry& OpKernelRegistry::SetInplaceProposalFn(InplaceProposalFn fn) {
   return *this;
 }
 
+OpKernelRegistry& OpKernelRegistry::SetPriority(int32_t priority) {
+  result_.priority = priority;
+  return *this;
+}
+
 Maybe<OpKernelRegistry&> OpKernelRegistry::Finish() {
   CHECK_OR_RETURN(result_.create_fn != nullptr)
       << "No Create function for " << result_.op_type_name;
-  if (result_.infer_tmp_size_fn == nullptr) {
-    result_.infer_tmp_size_fn = TmpSizeInferFnUtil::ZeroTmpSize;
-  }
+  result_.need_temp_storage = (result_.infer_tmp_size_fn != nullptr);
+  if (!result_.need_temp_storage) { result_.infer_tmp_size_fn = TmpSizeInferFnUtil::ZeroTmpSize; }
   if (result_.inplace_proposal_fn == nullptr) {
     result_.inplace_proposal_fn = [](const InferContext&, AddInplaceArgPair) {
       return Maybe<void>::Ok();
     };
+  }
+  if (result_.is_matched_hob == nullptr) {
+    static auto hob_true = std::make_shared<decltype(user_op::HobTrue())>(user_op::HobTrue());
+    result_.is_matched_hob = hob_true;
   }
   return *this;
 }

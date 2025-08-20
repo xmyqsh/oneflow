@@ -13,228 +13,366 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import math
 import unittest
 import os
 import numpy as np
+import glob
 
 import oneflow as flow
 import oneflow.unittest
-from oneflow.nn.parameter import Parameter
 
 
-def _test_linear_graph_train_with_lr_sch(
-    test_case, iter_num, device, get_opt_and_lr_sch
-):
-    def train_with_module(iter_num=3):
-        linear = flow.nn.Linear(3, 8)
-        linear = linear.to(device)
-        flow.nn.init.constant_(linear.weight, -0.68758)
-        flow.nn.init.constant_(linear.bias, 0.23)
+class MyModule(flow.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.param = flow.nn.Parameter(flow.ones(3, 4))
 
-        opt, lr_sch = get_opt_and_lr_sch(linear.parameters())
+    def forward(self, input):
+        return self.param + input
 
-        x = flow.Tensor(
-            [
-                [-0.94630778, -0.83378579, -0.87060891],
-                [2.0289922, -0.28708987, -2.18369248],
-                [0.35217619, -0.67095644, -1.58943879],
-                [0.08086036, -1.81075924, 1.20752494],
-                [0.8901075, -0.49976737, -1.07153746],
-                [-0.44872912, -1.07275683, 0.06256855],
-                [-0.22556897, 0.74798368, 0.90416439],
-                [0.48339456, -2.32742195, -0.59321527],
-            ],
-            device=device,
-            requires_grad=False,
+
+class MyGraph(flow.nn.Graph):
+    def __init__(self, module, optimizer, lr_scheduler):
+        super().__init__()
+        self.m = module
+        self.add_optimizer(optimizer, lr_sch=lr_scheduler)
+
+    def build(self, input):
+        out = self.m(input)
+        out.mean().backward()
+        return out
+
+
+def _rand_input():
+    return flow.Tensor(np.random.rand(3, 4).astype(np.float32))
+
+
+def _get_graph_lrs_from_log(log_path):
+    lines = []
+    with open(log_path, "rt") as f:
+        for line in f:
+            lines.append(line.strip())
+
+    lines = lines[1:]
+    lrs = []
+    for i, line in enumerate(lines):
+        step, lr = line.split(",")
+        assert int(step) == i
+        lrs.append(float(lr))
+
+    return lrs
+
+
+class _DebugMode(object):
+    def __enter__(self):
+        os.environ["ONEFLOW_DEBUG_MODE"] = "True"
+
+    def __exit__(self, type, value, traceback):
+        del os.environ["ONEFLOW_DEBUG_MODE"]
+
+
+def _compare_graph_lr_scheduler_with_eager(test_case, **kwargs):
+    lr_scheduler_class = kwargs.pop("lr_scheduler", None)
+    base_lr = kwargs.pop("base_lr", None)
+    iters = kwargs.pop("iters", None)
+    rtol = kwargs.pop("rtol", 1e-05)
+    atol = kwargs.pop("atol", 1e-08)
+
+    if "warmup_method" in kwargs:
+        warmup_method = kwargs.pop("warmup_method", "linear")
+        warmup_iters = kwargs.pop("warmup_iters", 5)
+        warmup_factor = kwargs.pop("warmup_factor", 0.1)
+        warmup_prefix = kwargs.pop("warmup_prefix", False)
+        need_warmup = True
+    else:
+        need_warmup = False
+
+    assert base_lr is not None and iters is not None
+
+    module = MyModule()
+    optimizer = flow.optim.SGD([module.param], lr=base_lr)
+    lr_scheduler = (
+        lr_scheduler_class(optimizer, **kwargs) if lr_scheduler_class else None
+    )
+
+    if need_warmup:
+        lr_scheduler = flow.optim.lr_scheduler.WarmupLR(
+            lr_scheduler or optimizer,
+            warmup_factor=warmup_factor,
+            warmup_iters=warmup_iters,
+            warmup_method=warmup_method,
+            warmup_prefix=warmup_prefix,
         )
 
-        def one_iter():
-            of_out = linear(x)
-            of_out = of_out.sum()
+    graph = MyGraph(module, optimizer, lr_scheduler)
 
-            of_out.backward()
-            opt.step()
-            if lr_sch is not None:
-                lr_sch.step()
-            opt.zero_grad()
+    with _DebugMode():
+        for _ in range(iters + 1):
+            ret = graph(_rand_input())
+            ret.numpy()  # sync for graph finishing
 
-            return of_out.numpy(), linear.weight.numpy()
+    pid = os.getpid()
+    lr_log_file = glob.glob(f"log/*/{pid}-train_step2lr.csv")[0]
+    lrs = _get_graph_lrs_from_log(lr_log_file)
+    lrs = lrs[:iters]
 
-        check_list = []
-        for i in range(iter_num):
-            check_list.append(one_iter())
-        return check_list
+    optimizer.zero_grad(set_to_none=True)
+    eager_lrs = [lr_scheduler.get_last_lr()[0]]
+    for _ in range(iters):
+        ret = module(_rand_input())
+        ret.numpy()
+        optimizer.step()
+        lr_scheduler.step()
+        eager_lrs.append(lr_scheduler.get_last_lr()[0])
 
-    def train_with_graph(iter_num=3):
-        linear = flow.nn.Linear(3, 8)
-        linear = linear.to(device)
-        flow.nn.init.constant_(linear.weight, -0.68758)
-        flow.nn.init.constant_(linear.bias, 0.23)
+    eager_lrs = eager_lrs[:iters]
 
-        opt, lr_sch = get_opt_and_lr_sch(linear.parameters())
-
-        x = flow.Tensor(
-            [
-                [-0.94630778, -0.83378579, -0.87060891],
-                [2.0289922, -0.28708987, -2.18369248],
-                [0.35217619, -0.67095644, -1.58943879],
-                [0.08086036, -1.81075924, 1.20752494],
-                [0.8901075, -0.49976737, -1.07153746],
-                [-0.44872912, -1.07275683, 0.06256855],
-                [-0.22556897, 0.74798368, 0.90416439],
-                [0.48339456, -2.32742195, -0.59321527],
-            ],
-            device=device,
-            requires_grad=False,
-        )
-
-        class LinearTrainGraph(flow.nn.Graph):
-            def __init__(self):
-                super().__init__()
-                self.linear = linear
-                if lr_sch is None:
-                    self.add_optimizer(opt)
-                else:
-                    self.add_optimizer(opt, lr_sch=lr_sch)
-
-            def build(self, x):
-                out = self.linear(x)
-                out = out.sum()
-                out.backward()
-                return out
-
-        linear_t_g = LinearTrainGraph()
-
-        def one_iter():
-            of_graph_out = linear_t_g(x)
-            return of_graph_out.numpy(), linear_t_g.linear.weight.origin.numpy()
-
-        check_list = []
-        for i in range(iter_num):
-            check_list.append(one_iter())
-        return check_list
-
-    module_check_list = train_with_module(iter_num)
-    graph_check_list = train_with_graph(iter_num)
-    for i in range(iter_num):
-        # check equal on loss
-        test_case.assertTrue(
-            np.allclose(
-                module_check_list[i][0],
-                graph_check_list[i][0],
-                rtol=0.00001,
-                atol=0.00001,
-            )
-        )
-        # check equal on weight
-        test_case.assertTrue(
-            np.allclose(
-                module_check_list[i][1],
-                graph_check_list[i][1],
-                rtol=0.00001,
-                atol=0.00001,
-            )
-        )
-
-
-def _sgd_cosine_fn(parameters):
-    of_sgd = flow.optim.SGD(parameters, lr=0.001)
-    alpha = 0.5
-    decay_steps = 10
-    cosine_decay_lr = flow.optim.lr_scheduler.CosineDecayLR(
-        of_sgd, decay_steps=decay_steps, alpha=alpha
+    test_case.assertTrue(
+        np.allclose(lrs, eager_lrs, rtol=rtol, atol=atol),
+        f"\ngraph_lrs: {lrs}\nvs.\neager_lrs: {eager_lrs}",
     )
-    return of_sgd, cosine_decay_lr
-
-
-def _sgd_cosine_constant_fn(parameters):
-    of_sgd = flow.optim.SGD(parameters, lr=0.001)
-    alpha = 0.5
-    decay_steps = 10
-    cosine_decay_lr = flow.optim.lr_scheduler.CosineDecayLR(
-        of_sgd, decay_steps=decay_steps, alpha=alpha
-    )
-    constant_warmup_cosine_lr = flow.optim.lr_scheduler.WarmUpLR(
-        cosine_decay_lr, warmup_factor=0.5, warmup_iters=5, warmup_method="constant"
-    )
-    return of_sgd, constant_warmup_cosine_lr
-
-
-def _sgd_constant_fn(parameters):
-    of_sgd = flow.optim.SGD(parameters, lr=0.001)
-    alpha = 0.5
-    steps = 10
-    constant_warmup_lr = flow.optim.lr_scheduler.WarmUpLR(
-        of_sgd, warmup_factor=0.5, warmup_iters=5, warmup_method="constant"
-    )
-    return of_sgd, constant_warmup_lr
-
-
-def _sgd_cosine_linear_fn(parameters):
-    of_sgd = flow.optim.SGD(parameters, lr=0.001)
-    alpha = 0.5
-    decay_steps = 10
-    cosine_decay_lr = flow.optim.lr_scheduler.CosineDecayLR(
-        of_sgd, decay_steps=decay_steps, alpha=alpha
-    )
-    linear_warmup_cosine_lr = flow.optim.lr_scheduler.WarmUpLR(
-        cosine_decay_lr, warmup_factor=0.5, warmup_iters=5, warmup_method="linear"
-    )
-    return of_sgd, linear_warmup_cosine_lr
-
-
-def _sgd_linear_fn(parameters):
-    of_sgd = flow.optim.SGD(parameters, lr=0.001)
-    alpha = 0.5
-    steps = 10
-    linear_warmup_lr = flow.optim.lr_scheduler.WarmUpLR(
-        of_sgd, warmup_factor=0.5, warmup_iters=5, warmup_method="linear"
-    )
-    return of_sgd, linear_warmup_lr
 
 
 @unittest.skipIf(os.getenv("ONEFLOW_TEST_CPU_ONLY"), "only test cpu cases")
 @flow.unittest.skip_unless_1n1d()
-class TestLinearGraphTrainWithCosineLrScheduler(flow.unittest.TestCase):
-    def test_graph_cosine(test_case):
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cuda"), _sgd_cosine_fn
-        )
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cpu"), _sgd_cosine_fn
-        )
-
-    def test_graph_cosine_constant(test_case):
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cuda"), _sgd_cosine_constant_fn
-        )
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cpu"), _sgd_cosine_constant_fn
+class TestGraphLRSchedulerWithEager(flow.unittest.TestCase):
+    def test_constant_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=10,
+            lr_scheduler=flow.optim.lr_scheduler.ConstantLR,
+            factor=0.1,
+            total_iters=10,
         )
 
-    def test_graph_constant(test_case):
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cuda"), _sgd_constant_fn
-        )
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cpu"), _sgd_constant_fn
-        )
-
-    def test_graph_cosine_linear(test_case):
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cuda"), _sgd_cosine_linear_fn
-        )
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cpu"), _sgd_cosine_linear_fn
+    def test_linear_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.LinearLR,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=10,
         )
 
-    def test_graph_linear(test_case):
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cuda"), _sgd_linear_fn
+    def test_linear_lr_end_factor(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.LinearLR,
+            start_factor=0.1,
+            end_factor=0.9,
+            total_iters=10,
         )
-        _test_linear_graph_train_with_lr_sch(
-            test_case, 21, flow.device("cpu"), _sgd_linear_fn
+
+    def test_step_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=30,
+            lr_scheduler=flow.optim.lr_scheduler.StepLR,
+            step_size=10,
+            gamma=0.1,
+        )
+
+    def test_multi_step_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.MultiStepLR,
+            milestones=[5, 15],
+            gamma=0.2,
+        )
+
+    def test_polynomial_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.PolynomialLR,
+            decay_batch=20,
+            end_learning_rate=1e-5,
+            power=2.0,
+            atol=1e-5,
+        )
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.01,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.PolynomialLR,
+            decay_batch=20,
+            end_learning_rate=1e-4,
+            power=1.0,
+            cycle=True,
+        )
+
+    def test_exponential_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=10,
+            lr_scheduler=flow.optim.lr_scheduler.ExponentialLR,
+            gamma=0.5,
+            atol=1e-5,
+        )
+
+    def test_cosine_decay_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.CosineDecayLR,
+            decay_steps=10,
+            alpha=1e-3,
+            atol=1e-5,
+        )
+
+    def test_cosine_annealing_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.CosineAnnealingLR,
+            T_max=10,
+            eta_min=1e-4,
+            atol=1e-5,
+        )
+
+    def test_linear_warmup_cosine_annealing_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.CosineAnnealingLR,
+            T_max=20,
+            eta_min=1e-5,
+            warmup_method="linear",
+            warmup_factor=0.1,
+            warmup_iters=5,
+            warmup_prefix=False,
+            atol=1e-5,
+        )
+
+    def test_linear_warmup_prefix_cosine_annealing_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.CosineAnnealingLR,
+            T_max=20,
+            eta_min=1e-5,
+            warmup_method="linear",
+            warmup_factor=0.1,
+            warmup_iters=5,
+            warmup_prefix=True,
+            atol=1e-5,
+        )
+
+    def test_linear_warmup_multistep_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.MultiStepLR,
+            milestones=[10, 15],
+            gamma=0.1,
+            warmup_method="linear",
+            warmup_factor=0.1,
+            warmup_iters=5,
+        )
+
+    def test_constant_warmup_cosine_decay_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.CosineDecayLR,
+            decay_steps=20,
+            alpha=1e-3,
+            warmup_method="constant",
+            warmup_factor=0.1,
+            warmup_iters=5,
+            atol=1e-5,
+        )
+
+    def test_constant_warmup_prefix_cosine_decay_lr(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=20,
+            lr_scheduler=flow.optim.lr_scheduler.CosineDecayLR,
+            decay_steps=20,
+            alpha=1e-3,
+            warmup_method="constant",
+            warmup_factor=0.1,
+            warmup_iters=5,
+            warmup_prefix=True,
+            atol=1e-5,
+        )
+
+    def test_only_warmup(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=10,
+            lr_scheduler=None,
+            warmup_method="linear",
+            warmup_factor=0.1,
+            warmup_iters=5,
+        )
+
+    def test_warmup_iters_equal_to_zero(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=10,
+            lr_scheduler=flow.optim.lr_scheduler.StepLR,
+            step_size=3,
+            gamma=0.5,
+            warmup_method="linear",
+            warmup_iters=0,
+        )
+
+    def test_cosine_annealing_warm_restarts(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=50,
+            lr_scheduler=flow.optim.lr_scheduler.CosineAnnealingWarmRestarts,
+            T_0=10,
+            T_mult=1,
+            eta_min=0.01,
+            atol=1e-5,
+        )
+
+    def test_cosine_annealing_warm_restarts_mult_2(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=70,
+            lr_scheduler=flow.optim.lr_scheduler.CosineAnnealingWarmRestarts,
+            T_0=10,
+            T_mult=2,
+            eta_min=0.01,
+            atol=1e-5,
+        )
+
+    def test_cosine_annealing_warm_restarts_limit(self):
+        _compare_graph_lr_scheduler_with_eager(
+            self,
+            base_lr=0.1,
+            iters=50,
+            lr_scheduler=flow.optim.lr_scheduler.CosineAnnealingWarmRestarts,
+            T_0=10,
+            T_mult=2,
+            eta_min=0.01,
+            decay_rate=0.5,
+            restart_limit=2,
+            atol=1e-5,
         )
 
 

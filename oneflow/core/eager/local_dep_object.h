@@ -16,37 +16,22 @@ limitations under the License.
 #ifndef ONEFLOW_CORE_FRAMEWORK_LOCAL_DEP_OBJECT_H_
 #define ONEFLOW_CORE_FRAMEWORK_LOCAL_DEP_OBJECT_H_
 
-#include "oneflow/core/object_msg/object_msg_core.h"
-#include "oneflow/core/vm/vm_object.msg.h"
+#include "oneflow/core/intrusive/intrusive.h"
+#include "oneflow/core/vm/vm_object.h"
 #include "oneflow/core/common/maybe.h"
 #include "oneflow/core/common/symbol.h"
+#include "oneflow/core/common/small_vector.h"
+#include "oneflow/core/common/op_args_reserved_size.h"
+#include "oneflow/core/framework/device.h"
 
 namespace oneflow {
 
-class Device;
+// LocalDepObject helps VirtualMachineEngine building instruction edges
+using LocalDepObject = vm::Dependence;
 
-// clang-format off
+using DependenceVector = small_vector<LocalDepObject*>;
 
-// Helps VirtualMachine building instruction edges
-OBJECT_MSG_BEGIN(LocalDepObject);
-
-  // methods
-  OF_PUBLIC static Maybe<ObjectMsgPtr<LocalDepObject>> New(const Device& device);
-
-  OF_PRIVATE Maybe<void> Init(const Device& device);
-
-  // fields
-  OBJECT_MSG_DEFINE_OPTIONAL(vm::LogicalObject, logical_object);
-  OBJECT_MSG_DEFINE_OPTIONAL(vm::MirroredObject, mirrored_object);
-
-  // links
-  OBJECT_MSG_DEFINE_LIST_LINK(free_link);
-  OBJECT_MSG_DEFINE_LIST_LINK(zombie_link);
-OBJECT_MSG_END(LocalDepObject);
-// clang-format on
-
-Maybe<LocalDepObject*> GetLocalDepObjectFromDevicePool(Symbol<Device> device);
-Maybe<LocalDepObject*> GetLocalDepObject4Device(const Device& device);
+intrusive::shared_ptr<LocalDepObject> NewLocalDepObject();
 
 }  // namespace oneflow
 

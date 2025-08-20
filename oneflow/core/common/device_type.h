@@ -29,4 +29,19 @@ struct hash<oneflow::DeviceType> final {
 
 }  // namespace std
 
+namespace oneflow {
+
+std::string PrintAvailableDevices();
+std::string PrintGeneratorAvailableDevices();
+
+#if defined(WITH_CUDA)
+#define DEVICE_TYPE_SEQ                  \
+  OF_PP_MAKE_TUPLE_SEQ(DeviceType::kCPU) \
+  OF_PP_MAKE_TUPLE_SEQ(DeviceType::kCUDA)
+#else
+#define DEVICE_TYPE_SEQ OF_PP_MAKE_TUPLE_SEQ(DeviceType::kCPU)
+#endif
+
+}  // namespace oneflow
+
 #endif  // ONEFLOW_CORE_COMMON_DEVICE_TYPE_H_

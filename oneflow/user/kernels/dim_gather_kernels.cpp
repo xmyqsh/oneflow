@@ -40,6 +40,7 @@ class DimGatherKernel final : public user_op::OpKernel {
  private:
   void Compute(KernelComputeContext* ctx) const override {
     const Tensor* input_tensor = ctx->Tensor4ArgNameAndIndex("input", 0);
+    if (input_tensor->shape_view().elem_cnt() == 0) { return; }
     const Tensor* index_tensor = ctx->Tensor4ArgNameAndIndex("index", 0);
     Tensor* out_tensor = ctx->Tensor4ArgNameAndIndex("output", 0);
     const int32_t dim = ctx->Attr<int32_t>("dim");
@@ -48,45 +49,36 @@ class DimGatherKernel final : public user_op::OpKernel {
     const IDX_T* index = index_tensor->dptr<IDX_T>();
     IN_T* output = out_tensor->mut_dptr<IN_T>();
 
-    int ndim = input_tensor->shape().NumAxes();
-    fixed_vector<IDX_T, kDimGatherMaxDimCount> shape_vec(ndim);
-    auto shape2dims = [&shape_vec, &ndim](const ShapeView& tensor_shape) -> void {
-      std::transform(tensor_shape.ptr(), tensor_shape.ptr() + ndim, shape_vec.begin(),
-                     [](int64_t dim) -> IDX_T { return static_cast<IDX_T>(dim); });
-    };
-    shape2dims(input_tensor->shape());
-    DimOpIndexNdHelper<IDX_T> input_nd_helper(shape_vec.data(), ndim);
-    shape2dims(index_tensor->shape());
-    DimOpIndexNdHelper<IDX_T> index_nd_helper(shape_vec.data(), ndim);
+    const Shape in_shape = ExpandDimIf0D(input_tensor->shape_view());
+    const auto ndim = in_shape.NumAxes();
+    const auto dim_length = in_shape.At(dim);
 
-    DimGatherFunctor<device_type, IN_T, IDX_T>()(
-        ctx->device_ctx(), input_nd_helper, index_nd_helper, ndim, index_tensor->shape().elem_cnt(),
-        dim, index, input, output);
+    DimOpIndexNdHelper<IDX_T> input_nd_helper(in_shape.data(), ndim);
+    DimOpIndexNdHelper<IDX_T> index_nd_helper(index_tensor->shape_view().data(), ndim);
+    DimGatherFunctor<device_type, IN_T, IDX_T>()(ctx->stream(), input_nd_helper, index_nd_helper,
+                                                 ndim, index_tensor->shape_view().elem_cnt(),
+                                                 dim_length, dim, index, input, output);
   }
   bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
 };
 
-#define REGISTER_DIM_GATHER_KERNEL(device, dtype, itype)                                 \
-  REGISTER_USER_KERNEL("dim_gather")                                                     \
-      .SetCreateFn<DimGatherKernel<device, dtype, itype>>()                              \
-      .SetIsMatchedHob((user_op::HobDeviceTag() == device)                               \
-                       & (user_op::HobDataType("input", 0) == GetDataType<dtype>::value) \
-                       & (user_op::HobDataType("index", 0) == GetDataType<itype>::value));
+#define REGISTER_DIM_GATHER_KERNEL(device, dtype_pair, itype_pair)                               \
+  REGISTER_USER_KERNEL("dim_gather")                                                             \
+      .SetCreateFn<                                                                              \
+          DimGatherKernel<device, OF_PP_PAIR_FIRST(dtype_pair), OF_PP_PAIR_FIRST(itype_pair)>>() \
+      .SetIsMatchedHob((user_op::HobDeviceType() == device)                                      \
+                       && (user_op::HobDataType("input", 0) == OF_PP_PAIR_SECOND(dtype_pair))    \
+                       && (user_op::HobDataType("index", 0) == OF_PP_PAIR_SECOND(itype_pair)));
 
-#define REGISTER_DIM_GATHER_KERNELS_WITH_DEVICE(device) \
-  REGISTER_DIM_GATHER_KERNEL(device, float, int32_t)    \
-  REGISTER_DIM_GATHER_KERNEL(device, double, int32_t)   \
-  REGISTER_DIM_GATHER_KERNEL(device, int32_t, int32_t)  \
-  REGISTER_DIM_GATHER_KERNEL(device, float, int64_t)    \
-  REGISTER_DIM_GATHER_KERNEL(device, double, int64_t)   \
-  REGISTER_DIM_GATHER_KERNEL(device, int32_t, int64_t)
-
-REGISTER_DIM_GATHER_KERNELS_WITH_DEVICE(DeviceType::kCPU);
+OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(
+    REGISTER_DIM_GATHER_KERNEL, (DeviceType::kCPU),
+    ARITHMETIC_DATA_TYPE_SEQ UNSIGNED_INT_DATA_TYPE_SEQ BOOL_DATA_TYPE_SEQ, INDEX_DATA_TYPE_SEQ)
 
 #ifdef WITH_CUDA
-REGISTER_DIM_GATHER_KERNELS_WITH_DEVICE(DeviceType::kGPU);
-REGISTER_DIM_GATHER_KERNEL(DeviceType::kGPU, float16, int32_t);
-REGISTER_DIM_GATHER_KERNEL(DeviceType::kGPU, float16, int64_t);
+OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(REGISTER_DIM_GATHER_KERNEL, (DeviceType::kCUDA),
+                                 ARITHMETIC_DATA_TYPE_SEQ UNSIGNED_INT_DATA_TYPE_SEQ
+                                     FLOAT16_DATA_TYPE_SEQ BOOL_DATA_TYPE_SEQ,
+                                 INDEX_DATA_TYPE_SEQ)
 #endif  // WITH_CUDA
 
 }  // namespace user_op

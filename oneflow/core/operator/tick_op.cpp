@@ -22,7 +22,7 @@ namespace {
 
 Maybe<void> InferBlobDescs(const std::function<BlobDesc*(const std::string&)>& BlobDesc4BnInOp) {
   BlobDesc* blob_desc = BlobDesc4BnInOp("out");
-  blob_desc->mut_shape() = Shape({1});
+  blob_desc->set_shape(Shape({1}));
   blob_desc->set_data_type(DataType::kInt8);
   return Maybe<void>::Ok();
 }
@@ -50,7 +50,7 @@ Maybe<void> TickOp::InferOutBlobDescs(
 
 Maybe<void> TickOp::GetSbpSignatures(
     const std::function<Maybe<const BlobDesc&>(const std::string&)>& LogicalBlobDesc4Ibn,
-    cfg::SbpSignatureList* sbp_sig_list) const {
+    SbpSignatureList* sbp_sig_list) const {
   return Maybe<void>::Ok();
 }
 

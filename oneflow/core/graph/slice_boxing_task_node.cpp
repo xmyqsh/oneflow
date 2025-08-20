@@ -13,35 +13,28 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "oneflow/core/framework/to_string.h"
 #include "oneflow/core/graph/slice_boxing_task_node.h"
-#include "oneflow/core/graph/id_serialization.h"
+
+#include "oneflow/core/framework/to_string.h"
+#include "oneflow/core/graph/task_graph_rebuild_ctx.h"
 
 namespace oneflow {
 
 void SliceBoxingTaskNode::Init(const LogicalBlobId& lbi, const TensorSliceView& out_slice,
-                               const SliceBoxingTaskMode mode, int64_t machine_id, int64_t thrd_id,
-                               MemZoneId&& mem_zone_id) {
+                               const SliceBoxingTaskMode mode, int64_t machine_id,
+                               int64_t thrd_id) {
   out_slice_ = out_slice;
   out_shape_ = out_slice.shape();
   mode_ = mode;
-  mem_zone_id_ = std::move(mem_zone_id);
   set_machine_id(machine_id);
   set_thrd_id(thrd_id);
   set_lbi(lbi);
 }
 
-void SliceBoxingTaskNode::Init(const LogicalBlobId& lbi, const TensorSliceView& out_slice,
-                               const SliceBoxingTaskMode mode, int64_t machine_id,
-                               int64_t thrd_id) {
-  StreamId stream_id = DeserializeStreamIdFromInt64(thrd_id);
-  Init(lbi, out_slice, mode, machine_id, thrd_id, MemZoneId(stream_id.device_id()));
-}
-
 void SliceBoxingTaskNode::ProduceAllRegstsAndBindEdges() {
-  std::shared_ptr<RegstDesc> out_regst_desc = ProduceRegst("out", false, 2, 2);
+  std::shared_ptr<RegstDesc> out_regst_desc = ProduceRegst("out", true);
   this->ForEachOutDataEdge([&](TaskEdge* edge) { edge->AddRegst("out", out_regst_desc); });
-  ProduceRegst("tmp", false, 1, 1);
+  ProduceRegst("tmp", true);
 }
 
 void SliceBoxingTaskNode::ConsumeAllRegsts() {
@@ -72,7 +65,7 @@ void SliceBoxingTaskNode::BuildExecGphAndRegst() {
   out_regst->AddLbi(lbi());
   node->BindBnWithRegst(op->SoleObn(), out_regst);
   node->AddBnToRegstAndBindIt(&Operator::tmp_bns, GetProducedRegst("tmp"));
-  node->InferBlobDescs(parallel_ctx());
+  (node->*GetInferBlobDescsMethod())(parallel_ctx());
 }
 
 void SliceBoxingTaskNode::InferProducedDataRegstTimeShape() {
@@ -81,7 +74,7 @@ void SliceBoxingTaskNode::InferProducedDataRegstTimeShape() {
 
 void SliceBoxingTaskNode::SetInDataEdgeSlice(const TaskEdge* edge, const TensorSliceView& slice) {
   CHECK(in_data_edge2slice_.emplace(edge, slice).second);
-  ordered_in_data_edges_.push_back(edge);
+  ordered_in_data_edges_.emplace_back(edge);
 }
 
 void SliceBoxingTaskNode::ConnectToSrcNodeWithSlice(TaskNode* src, TaskEdge* edge,
@@ -117,20 +110,39 @@ OperatorConf SliceBoxingTaskNode::GetBoxingOpConf() {
   return op_conf;
 }
 
-void SliceBoxingTaskNode::InitProducedRegstMemCase(MemoryCase* mem_case) {
-  if (mem_zone_id_.device_type() == DeviceType::kCPU) {
-    HostMemory* host_mem = mem_case->mutable_host_mem();
-    StreamId stream_id = DeserializeStreamIdFromInt64(thrd_id());
-    if (stream_id.device_id().device_type() == DeviceType::kGPU) {
-      host_mem->mutable_cuda_pinned_mem()->set_device_id(stream_id.device_id().device_index());
-    }
-  } else if (mem_zone_id_.device_type() == DeviceType::kGPU) {
-    mem_case->mutable_device_cuda_mem()->set_device_id(mem_zone_id_.device_index());
-  } else {
-    UNIMPLEMENTED();
+Maybe<void> SliceBoxingTaskNode::InitTransportTaskFromProto(
+    const TransportTaskProto& transport_task_proto, const TaskGraphRebuildCtx& ctx) {
+  CHECK_OR_RETURN(transport_task_proto.has_slice_boxing_task())
+      << "not a serialized SliceBoxingTaskNode. debug string: "
+      << transport_task_proto.DebugString();
+  const auto& proto = transport_task_proto.slice_boxing_task();
+  for (const auto& pair : proto.in_data_edge_uid2slice()) {
+    const auto* edge = JUST(ctx.TaskEdge4Uid(pair.first));
+    CHECK_OR_RETURN(in_data_edge2slice_.emplace(edge, pair.second).second)
+        << "redundant edge found. edge_uid: " << pair.first;
   }
+  for (int64_t edge_uid : proto.ordered_in_data_edge_uid()) {
+    ordered_in_data_edges_.push_back(JUST(ctx.TaskEdge4Uid(edge_uid)));
+  }
+  out_slice_ = TensorSliceView(proto.out_slice());
+  out_shape_ = Shape(proto.out_shape());
+  mode_ = proto.mode();
+  return Maybe<void>::Ok();
 }
 
-MemZoneId SliceBoxingTaskNode::MemZoneId121() const { return mem_zone_id_; }
+void SliceBoxingTaskNode::ToTransportTaskProto(TransportTaskProto* transport_task_proto) const {
+  ToProto(transport_task_proto->mutable_task_proto(), /*check=*/false);
+  auto* proto = transport_task_proto->mutable_slice_boxing_task();
+  for (const auto& pair : in_data_edge2slice_) {
+    int64_t edge_uid = reinterpret_cast<int64_t>(pair.first);
+    pair.second.ToProto(&(*proto->mutable_in_data_edge_uid2slice())[edge_uid]);
+  }
+  for (const auto* edge : ordered_in_data_edges_) {
+    proto->add_ordered_in_data_edge_uid(reinterpret_cast<int64_t>(edge));
+  }
+  out_slice_.ToProto(proto->mutable_out_slice());
+  out_shape_.ToProto(proto->mutable_out_shape());
+  proto->set_mode(mode_);
+}
 
 }  // namespace oneflow

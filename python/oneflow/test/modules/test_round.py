@@ -19,18 +19,38 @@ from collections import OrderedDict
 import numpy as np
 
 import oneflow as flow
-from test_util import GenArgList
-from automated_test_util import *
+from oneflow.test_utils.test_util import GenArgList
+
+from oneflow.test_utils.automated_test_util import *
 
 
 @flow.unittest.skip_unless_1n1d()
 class TestRound(flow.unittest.TestCase):
-    @autotest()
+    @autotest(check_graph=True)
     def test_flow_round_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor().to(device)
+        x = random_tensor().to(device)
         y = torch.round(x)
         return y
+
+    @autotest(check_graph=True)
+    def test_flow_round_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
+        y = torch.round(x)
+        return y
+
+    @autotest(check_graph=True)
+    def test_flow_round_half_to_even(test_case):
+        device = random_device()
+        random_shape = [random(1, 10).to(int).value() for _ in range(4)]
+        random_tenosr = np.random.randint(-99999, 99999, size=random_shape)
+        x = torch.tensor(random_tenosr).to(device)
+        y = torch.full(x.shape, 0.5).to(device)
+        y += x
+        y = y.requires_grad_()
+        z = torch.round(y)
+        return z
 
 
 if __name__ == "__main__":

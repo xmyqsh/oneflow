@@ -18,16 +18,17 @@ import unittest
 from collections import OrderedDict
 
 import numpy as np
-from test_util import GenArgList
+from oneflow.test_utils.test_util import GenArgList
 
 import oneflow as flow
 import oneflow.unittest
-from automated_test_util import *
+
+from oneflow.test_utils.automated_test_util import *
 
 
 def _test_sign_impl(test_case, shape, device):
     np_input = np.random.randn(*shape)
-    of_input = flow.Tensor(
+    of_input = flow.tensor(
         np_input, dtype=flow.float32, device=flow.device(device), requires_grad=True
     )
     of_out = flow.sign(of_input)
@@ -48,10 +49,31 @@ class TestSign(flow.unittest.TestCase):
         for arg in GenArgList(arg_dict):
             _test_sign_impl(test_case, *arg)
 
-    @autotest(auto_backward=False)
-    def test_sign_with_0shape_data(test_case):
+    @autotest(n=5)
+    def test_sign_with_random_data(test_case):
         device = random_device()
-        x = random_pytorch_tensor(4, 2, 3, 0, 4).to(device)
+        x = random_tensor().to(device)
+        y = torch.sign(x)
+        return y
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_sign_with_0_size_data(test_case):
+        device = random_device()
+        x = random_tensor(4, 2, 3, 0, 4).to(device)
+        y = torch.sign(x)
+        return y
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_sign_with_random_data(test_case):
+        device = random_device()
+        x = random_tensor().to(device=device, dtype=torch.bool)
+        y = torch.sign(x)
+        return y
+
+    @autotest(n=5, auto_backward=False, check_graph=True)
+    def test_sign_with_0dim_data(test_case):
+        device = random_device()
+        x = random_tensor(ndim=0).to(device)
         y = torch.sign(x)
         return y
 

@@ -21,14 +21,14 @@ limitations under the License.
 namespace oneflow {
 
 class Kernel;
-struct KernelContext;
+class KernelContext;
 class Blob;
 
 namespace profiler {
 
-void TraceKernelForwardDataContentStart(const KernelContext* kernel_ctx, const Kernel* kernel);
+void TraceKernelForwardDataContentStart(KernelContext* kernel_ctx, const Kernel* kernel);
 
-void TraceKernelForwardDataContentEnd(const KernelContext* kernel_ctx, const Kernel* kernel);
+void TraceKernelForwardDataContentEnd(KernelContext* kernel_ctx, const Kernel* kernel);
 
 }  // namespace profiler
 

@@ -13,38 +13,31 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "oneflow/core/vm/thread_ctx.msg.h"
+#include "oneflow/core/vm/thread_ctx.h"
 #include "oneflow/core/common/util.h"
 
 namespace oneflow {
 namespace vm {
 
-void ThreadCtx::LoopRun(const std::function<void(ThreadCtx*)>& Initializer) {
-  Initializer(this);
-  while (ReceiveAndRun() == kObjectMsgConditionListStatusSuccess) {}
-}
+ThreadCtx::ThreadCtx()
+    : intrusive_ref_(),
+      stream_list_(),
+      worker_pending_instruction_mutex_(),
+      worker_pending_instruction_list_(&worker_pending_instruction_mutex_),
+      notifier_(),
+      transport_dependence_(intrusive::make_shared<vm::Dependence>()),
+      thread_ctx_hook_() {}
 
-ObjectMsgConditionListStatus ThreadCtx::ReceiveAndRun() {
-  const StreamType& stream_type = stream_rt_desc().stream_type();
-  OBJECT_MSG_LIST(Instruction, pending_instruction_link) tmp_list;
-  ObjectMsgConditionListStatus status = mut_pending_instruction_list()->MoveTo(&tmp_list);
-  OBJECT_MSG_LIST_FOR_EACH(&tmp_list, instruction) {
+size_t ThreadCtx::TryReceiveAndRun() {
+  intrusive::List<INTRUSIVE_FIELD(Instruction, worker_pending_instruction_hook_)> tmp_list;
+  mut_worker_pending_instruction_list()->MoveTo(&tmp_list);
+  size_t size = tmp_list.size();
+  INTRUSIVE_FOR_EACH(instruction, &tmp_list) {
     tmp_list.Erase(instruction.Mutable());
-    stream_type.Run(instruction.Mutable());
+    const StreamPolicy& stream_policy = instruction->stream().stream_policy();
+    stream_policy.RunIf(instruction.Mutable());
   }
-  return status;
-}
-
-ObjectMsgConditionListStatus ThreadCtx::TryReceiveAndRun() {
-  const StreamType& stream_type = stream_rt_desc().stream_type();
-  OBJECT_MSG_LIST(Instruction, pending_instruction_link) tmp_list;
-  ObjectMsgConditionListStatus status = mut_pending_instruction_list()->TryMoveTo(&tmp_list);
-  OBJECT_MSG_LIST_FOR_EACH_PTR(&tmp_list, instruction) {
-    CHECK_GT(instruction->ref_cnt(), 1);
-    tmp_list.Erase(instruction);
-    stream_type.Run(instruction);
-  }
-  return status;
+  return size;
 }
 
 }  // namespace vm

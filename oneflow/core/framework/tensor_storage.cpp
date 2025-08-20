@@ -14,21 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/framework/tensor_storage.h"
-#include "oneflow/core/eager/eager_blob_object.h"
-#include "oneflow/core/eager/local_dep_object.h"
+#include "oneflow/core/eager/tensor_storage.h"
 #include "oneflow/core/framework/shut_down_util.h"
 
 namespace oneflow {
 namespace one {
 
-TensorStorage::TensorStorage(const std::shared_ptr<const ParallelDesc>& parallel_desc)
-    : buffer_(std::make_shared<vm::TensorBuffer>()) {}
-
-TensorStorage::TensorStorage(const std::shared_ptr<vm::TensorBuffer>& tensor_buffer)
-    : buffer_(tensor_buffer) {}
+TensorStorage::TensorStorage(const std::shared_ptr<vm::TensorStorage>& tensor_storage)
+    : storage_(tensor_storage) {}
 
 TensorStorage::~TensorStorage() {
-  if (!IsShuttingDown() && releaser_hook_) { (*releaser_hook_)(buffer_); }
+  if (!IsShuttingDown() && releaser_hook_) { (*releaser_hook_)(storage_); }
 }
 
 }  // namespace one

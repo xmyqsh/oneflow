@@ -17,6 +17,7 @@ limitations under the License.
 #include "oneflow/core/framework/rank_group_rpc_util.h"
 #include "oneflow/core/job/rank_group_scope.h"
 #include "oneflow/core/job/parallel_desc.h"
+#include "oneflow/core/common/constant.h"
 
 namespace oneflow {
 
@@ -25,8 +26,9 @@ namespace {
 static const int kLimitParallelConfString = 1024 * 64;
 struct FlatParallelConf {
   size_t available_size() const {
-    CHECK_GE(this->buffer_size, 0);
-    CHECK_LT(this->buffer_size, kLimitParallelConfString);
+    CHECK_GE(this->buffer_size, 0) << "Buffer size should be non-negative";
+    CHECK_LT(this->buffer_size, kLimitParallelConfString)
+        << "Buffer size should be less than " << kLimitParallelConfString;
     return sizeof(FlatParallelConf) - kLimitParallelConfString + this->buffer_size;
   }
 
@@ -41,22 +43,33 @@ struct FlatParallelConf {
   Maybe<void> Init(uint64_t symbol_id, Symbol<ParallelDesc> parallel_desc) {
     const auto& parallel_conf = parallel_desc->parallel_conf();
     int64_t byte_size = parallel_conf.ByteSize();
-    CHECK_LE_OR_RETURN(byte_size, kLimitParallelConfString);
+    CHECK_LE_OR_RETURN(byte_size, kLimitParallelConfString)
+        << Error::InvalidValueError() << "Byte size of parallel description should be less than "
+        << kLimitParallelConfString << ", but got " << byte_size;
     this->symbol_id = symbol_id;
     this->buffer_size = byte_size;
-    CHECK_OR_RETURN(parallel_conf.SerializeToArray(this->buffer, kLimitParallelConfString));
+    CHECK_OR_RETURN(parallel_conf.SerializeToArray(this->buffer, kLimitParallelConfString))
+        << Error::RuntimeError()
+        << "Error serializing parallel description: " << parallel_conf.ShortDebugString();
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Check(uint64_t symbol_id, Symbol<ParallelDesc> parallel_desc) const {
     const auto& parallel_conf = parallel_desc->parallel_conf();
     int64_t byte_size = parallel_conf.ByteSize();
-    CHECK_LE_OR_RETURN(byte_size, kLimitParallelConfString);
-    CHECK_EQ_OR_RETURN(this->symbol_id, symbol_id);
-    CHECK_EQ_OR_RETURN(this->buffer_size, byte_size);
+    const auto& debugString = parallel_conf.ShortDebugString();
+    CHECK_LE_OR_RETURN(byte_size, kLimitParallelConfString)
+        << Error::InvalidValueError() << "Byte size of parallel description should be less than "
+        << kLimitParallelConfString << ", but got " << byte_size;
+    CHECK_EQ_OR_RETURN(this->symbol_id, symbol_id) << Error::RuntimeError() << "expected symbol id "
+                                                   << symbol_id << ", but got " << this->symbol_id;
+    CHECK_EQ_OR_RETURN(this->buffer_size, byte_size)
+        << Error::RuntimeError() << "Inconsistent parallel description: " << debugString;
     std::vector<char> serialized(byte_size);
-    CHECK_OR_RETURN(parallel_conf.SerializeToArray(serialized.data(), kLimitParallelConfString));
-    CHECK_EQ_OR_RETURN(std::memcmp(serialized.data(), this->buffer, byte_size), 0);
+    CHECK_OR_RETURN(parallel_conf.SerializeToArray(serialized.data(), kLimitParallelConfString))
+        << Error::RuntimeError() << "Error serializing parallel description: " << debugString;
+    CHECK_EQ_OR_RETURN(std::memcmp(serialized.data(), this->buffer, byte_size), 0)
+        << Error::RuntimeError() << "Inconsistent parallel description: " << debugString;
     return Maybe<void>::Ok();
   }
 
@@ -89,7 +102,7 @@ Maybe<void> SyncSymbolParallelDesc(uint64_t symbol_id, Symbol<ParallelDesc> para
   const auto& rank_group = JUST(RankGroupScope::CurrentRankGroup());
   JUST(TransportUtil::SendToNextRankInRing(rank_group, transport_token, &ctx));
   JUST(TransportUtil::ReceiveFromPrevRankInRing(rank_group, transport_token, &ctx));
-  JUST(TransportUtil::WaitUntilDoneOrTimeout(ctx, TransportUtil::TimeoutSeconds()));
+  JUST_MSG(ctx.WaitDone(), kAsymmetricCodeErrorMsg);
   JUST(recv_buffer->Check(symbol_id, parallel_desc));
   return Maybe<void>::Ok();
 }

@@ -22,39 +22,39 @@ namespace one {
 
 struct ScalarMulCaptureState : public AutoGradCaptureState {
   bool requires_grad;
-  functional::Scalar operand;
+  Scalar operand;
 };
 
 class ScalarMul : public OpExprGradFunction<ScalarMulCaptureState> {
  public:
   Maybe<void> Init(const OpExpr& op) override {
     const auto* fw_op_expr = dynamic_cast<const UserOpExpr*>(&op);
-    CHECK_NOTNULL_OR_RETURN(fw_op_expr);
+    CHECK_NOTNULL_OR_RETURN(fw_op_expr);  // NOLINT(maybe-need-error-msg)
     base_attrs_ = MakeAttrMapFromUserOpConf(fw_op_expr->proto());
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Capture(ScalarMulCaptureState* ctx, const TensorTuple& inputs,
                       const TensorTuple& outputs, const AttrMap& attrs) const override {
-    CHECK_EQ_OR_RETURN(inputs.size(), 1);
+    CHECK_EQ_OR_RETURN(inputs.size(), 1);  // NOLINT(maybe-need-error-msg)
     ctx->requires_grad = inputs.at(0)->requires_grad();
     if (!ctx->requires_grad) { return Maybe<void>::Ok(); }
     ComposedAttrMap composed_attrs(attrs, base_attrs_);
     bool has_float_operand = JUST(composed_attrs.GetAttr<bool>("has_float_operand"));
     if (has_float_operand) {
-      ctx->operand = functional::Scalar(JUST(composed_attrs.GetAttr<double>("float_operand")));
+      ctx->operand = Scalar(JUST(composed_attrs.GetAttr<double>("float_operand")));
     } else {
-      ctx->operand = functional::Scalar(JUST(composed_attrs.GetAttr<int64_t>("int_operand")));
+      ctx->operand = Scalar(JUST(composed_attrs.GetAttr<int64_t>("int_operand")));
     }
     return Maybe<void>::Ok();
   }
 
   Maybe<void> Apply(const ScalarMulCaptureState* ctx, const TensorTuple& out_grads,
                     TensorTuple* in_grads) const override {
-    CHECK_EQ_OR_RETURN(out_grads.size(), 1);
+    CHECK_EQ_OR_RETURN(out_grads.size(), 1);  // NOLINT(maybe-need-error-msg)
     in_grads->resize(1);
     if (ctx->requires_grad) {
-      in_grads->at(0) = JUST(functional::ScalarMul(out_grads.at(0), ctx->operand));
+      in_grads->at(0) = JUST(functional::ScalarMul(out_grads.at(0), ctx->operand, false));
     }
     return Maybe<void>::Ok();
   }

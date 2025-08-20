@@ -16,6 +16,7 @@ limitations under the License.
 #include "oneflow/core/framework/op_builder.h"
 
 #include "oneflow/core/common/protobuf.h"
+#include "oneflow/core/framework/attr_value.h"
 #include "oneflow/core/framework/attr_value_accessor.h"
 #include "oneflow/core/framework/id_util.h"
 
@@ -38,13 +39,15 @@ Maybe<OpBuilder&> OpBuilder::MaybeInput(const std::string& input_name, const int
   CHECK_GT_OR_RETURN(count, 0);
   CHECK_EQ_OR_RETURN(proto_.input().count(input_name), 0)
       << "The Input " << input_name << " has been specified more than once.";
+  proto_.add_input_order(input_name);
   auto* input_list = &((*(proto_.mutable_input()))[input_name]);
   for (int i = 0; i < count; ++i) {
     const std::string& tensor_name =
         op_name_ + "/" + PositionalPlaceholderPrefix + std::to_string(input_pos_++);
     input_list->mutable_s()->Add()->assign(tensor_name);
-    indexed_ibns_.push_back(input_name + "_" + std::to_string(i));
+    indexed_ibns_.emplace_back(input_name + "_" + std::to_string(i));
   }
+  CHECK_EQ_OR_RETURN(proto_.input().size(), proto_.input_order().size());
   return *this;
 }
 
@@ -59,12 +62,14 @@ Maybe<OpBuilder&> OpBuilder::MaybeOutput(const std::string& output_name, const i
   CHECK_GT_OR_RETURN(count, 0);
   CHECK_EQ_OR_RETURN(proto_.output().count(output_name), 0)
       << "The output " << output_name << " has been specified more than once.";
+  proto_.add_output_order(output_name);
   auto* output_list = &((*(proto_.mutable_output()))[output_name]);
   for (int i = 0; i < count; ++i) {
     const std::string& tensor_name = op_name_ + "/" + output_name + "_" + std::to_string(i);
     output_list->mutable_s()->Add()->assign(tensor_name);
-    indexed_obns_.push_back(output_name + "_" + std::to_string(i));
+    indexed_obns_.emplace_back(output_name + "_" + std::to_string(i));
   }
+  CHECK_EQ_OR_RETURN(proto_.output().size(), proto_.output_order().size());
   return *this;
 }
 
@@ -85,20 +90,6 @@ Maybe<OpBuilder&> OpBuilder::MaybeAttr(const std::string& attr_name, const AttrV
 template<>
 OpBuilder& OpBuilder::Attr(const std::string& attr_name, const AttrValue& attr_value) {
   return CHECK_JUST(MaybeAttr<AttrValue>(attr_name, attr_value));
-}
-
-template<>
-Maybe<OpBuilder&> OpBuilder::MaybeAttr(const std::string& attr_name,
-                                       const cfg::AttrValue& attr_value) {
-  AttrValue pb_attr_value;
-  attr_value.ToProto(&pb_attr_value);
-  (*(proto_.mutable_attr()))[attr_name] = pb_attr_value;
-  return *this;
-}
-
-template<>
-OpBuilder& OpBuilder::Attr(const std::string& attr_name, const cfg::AttrValue& attr_value) {
-  return CHECK_JUST(MaybeAttr(attr_name, attr_value));
 }
 
 #define DEFINE_OP_BUILDER_ATTR_FUNC(field, cpp_type, attr_type)                             \
